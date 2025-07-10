@@ -501,8 +501,8 @@ setup(
         'docs': docs,
         'ray': ray,
         'cleanrl': cleanrl,
-        'common': common,
-        **environments,
+       # 'common': common,
+       # **environments,
     },
     ext_modules = c_extensions + torch_extensions,
     cmdclass={
