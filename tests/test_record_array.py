@@ -34,7 +34,7 @@ def create_dtype_from_space(space):
 space_dtype = create_dtype_from_space(space)
 
 sample = dict(space.sample())
-breakpoint()
+
 np.rec.array(sample, dtype=space_dtype)
 
 # Function to sample from the space and convert to a structured numpy array
