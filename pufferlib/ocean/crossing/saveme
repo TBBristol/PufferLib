@@ -1,0 +1,28 @@
+ //set up obs [OHE entity type, OHE entity, OHE paired entity, OHE location]
+    for (int i = 0; i < env->num_entities; ++i) {
+    
+    // Set ENTITY_ID one-hot
+    OBS(env, i, ENTITY_ID_COL + i) = 1;
+    printf("setting row %d\n", i);
+    // Set TYPE and PAIR_ID
+    if (i < env->max_passengers * 2) {
+        // Passengers are even rows (0, 2, 4...), agents are odd (1, 3, 5...)
+        int is_passenger = (i % 2 == 0);
+        if (is_passenger) {
+            OBS(env, i, TYPE_COL + 0) = 1; // passenger
+            OBS(env, i, PAIR_ID_COL + (i + 1)) = 1; // pair with agent below
+            printf("Is passneger\n");
+        } else {
+            OBS(env, i, TYPE_COL + 1) = 1; // agent
+            OBS(env, i, PAIR_ID_COL + (i - 1)) = 1; // pair with passenger above
+            printf("Is agent\n");
+        }
+    } else {
+        OBS(env, i, TYPE_COL + 2) = 1; // boat
+        printf("Is boat\n");
+        // no pair
+    }
+
+    // All entities start on the left bank
+    OBS(env, i, LOC_COL + 0) = 1;
+}

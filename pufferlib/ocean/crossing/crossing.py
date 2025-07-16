@@ -9,9 +9,9 @@ from pufferlib.ocean.crossing import binding
 class RiverCrossing(pufferlib.PufferEnv):
     def __init__(self, 
                  boats=1,
-                  passengers=3, 
-                  max_passengers = 3, 
-                  max_boats = 2,
+                  passengers=1, 
+                  max_passengers = 1, 
+                  max_boats = 1,
                   max_ep_steps = 100,
                   num_envs=1, 
                   render_mode=None, 
@@ -19,73 +19,27 @@ class RiverCrossing(pufferlib.PufferEnv):
                   buf=None, 
                   seed=0):
          #OBS space is:
-        """
-        [
-        [num_passengers, num_agents,num_boats],
-        [leftbank[0-1], boat_id, rightbank [0-1]], #for each passenger and agent
-        .
-        .  2* passengers (equal to agents)   
-        . 
-        [leftbank[0-1], 0 , rightbank [0-1]].    #for each boat
-        .
-        .
-        [padding, padding, padding] to max_passengers *2 + max_boats
-        ]
-        """
-
-        num_rows = 1 + max_passengers * 2 + max_boats
-
-        #default low to zero high to zero
-        low = np.zeros((num_rows,3), dtype = np.int32)
-        high = np.zeros((num_rows,3), dtype = np.int32)
-
-        #These can't take any other values
-        #first row first two columns are same value and == number of passengers (equal to num agents)
-        high[0,0:2] = max_passengers
-        low[0,0:2] = max_passengers
-        #first row last column max is num boats
-        high[0,2] = max_boats
-        low[0,2] = max_boats
         
-        #left and right columns are 1 or zero so change the high this is the same for boats
-        high[1:max_passengers*2 + 1 + max_boats,0] = 1
-        high[1:max_passengers*2 + 1 +max_boats, 2] = 1
-
-        #middle column is boat id for the passenger and agent section so max is boats will start boat ids at 1 so differentiate from not in a boat
-        #boats middle column is un-unsed
-        high[1:max_passengers*2 + 1, 1] = max_boats
-
-
+        """newobs
+        num_entities = max_passengers *2 + max_boats
+        num_rows = num_entities
+        Each row is:
+        [OHE entity type, OHE entity, OHE paired entity, OHE location]
+        Size of obs is:
+        3 entity types + num_entites + num_entities + 2 loctions (L/R) and + num_boats locations
         """
-         self.single_observation_space for 3 passengers 1 boat
-        Box([[3 3 1]
-        [0 0 0]
-        [0 0 0]
-        [0 0 0]
-        [0 0 0]
-        [0 0 0]
-        [0 0 0]
-        [0 0 0]], 
-
-        [[3 3 1]
-        [1 1 1]
-        [1 1 1]
-        [1 1 1]
-        [1 1 1]
-        [1 1 1]
-        [1 1 1]
-        [1 0 1]], (8, 3), uint8)
-        """
-        
+        num_entities = max_passengers * 2 + max_boats
+        obs_shape_length = 3 + num_entities * 2 + 2 + max_boats
 
 
-
-
-
-        self.single_observation_space = gymnasium.spaces.Box(low =low, 
-                                                             high = high, 
+        self.single_observation_space = gymnasium.spaces.Box(low = 0, 
+                                                             high = 1,
+                                                             shape = (num_entities, obs_shape_length),
                                                              dtype=np.int32)
+        #Actions space is:
+        # [boat_id, passenger/agent_id, action(0=unload, 1=load, 2=move)]
         self.single_action_space = gymnasium.spaces.MultiDiscrete((boats, 2*passengers,3),dtype=np.int32)
+
         self.render_mode = render_mode
         self.log_interval = log_interval
         self.num_agents = num_envs
@@ -136,9 +90,10 @@ if __name__ == '__main__':
     max_passengers = 1
     max_boats = 1
     boats = 1
-    env = RiverCrossing(passengers=passengers, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
+    env = RiverCrossing(passengers=1, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
     obs, _ = env.reset()
     print(env.action_space)
     print(obs)
+    print("STOP")
    
 
