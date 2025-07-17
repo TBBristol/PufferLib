@@ -1212,3 +1212,10 @@ def main():
 
 if __name__ == '__main__':
     main()
+    """args = load_config('puffer_crossing')
+    args['wandb'] = True
+    args['wandb_project'] = 'my_project_name'
+    args['wandb_group'] = 'my_group_name'
+    args['tag'] = 'baseline'
+
+    train(env_name='puffer_crossing', args=args)"""

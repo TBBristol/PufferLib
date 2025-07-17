@@ -78,18 +78,13 @@ static inline int at_col(RiverCrossing *env, int i, int col)
     return OBS(env, i, col) != 0;
 }
 
-static inline int in_a_boat(RiverCrossing *env, int i)
-{
-    return OBS(env, i, LOC_COL + 2);
-}
-
 /* -----------------------------------------------------------
  * 1 Count agents whose bit @loc_index == value
  * -----------------------------------------------------------*/
 static int count_agents_where(RiverCrossing *env, int loc_index, unsigned char value)
 {
     int cnt = 0;
-    for (int i = 0; i < env->num_entities; ++i)
+    for (int i = 0; i < env->passengers * 2; ++i)
         if (is_agent(i) && OBS(env, i, loc_index) == value)
             ++cnt;
     return cnt;
@@ -98,7 +93,7 @@ static int count_agents_where(RiverCrossing *env, int loc_index, unsigned char v
 static int count_passengers_where(RiverCrossing *env, int loc_index, unsigned char value)
 {
     int cnt = 0;
-    for (int i = 0; i < env->num_entities; ++i)
+    for (int i = 0; i < env-> passengers *2; ++i)
         if (is_passenger(i) && OBS(env, i, loc_index) == value)
             ++cnt;
     return cnt;
@@ -108,6 +103,16 @@ static int boat_col(RiverCrossing *env, int boat_idx)
 {
     return BOAT_LOC_COL + boat_idx;
 }
+
+static int in_a_boat(RiverCrossing *env, int entity_idx)
+{
+    for (int b = 0; b < env->boats; ++b) {
+        if (OBS(env, entity_idx, BOAT_LOC_COL + b) == 1)
+            return 1;
+    }
+    return 0;
+}
+
 
 /* -----------------------------------------------------------
  * 2 Count agents currently inside boat <boat_idx>
@@ -137,7 +142,7 @@ static int count_passengers_in_boat(RiverCrossing *env, unsigned char boat_idx)
 
 static int passenger_agent_conflicts_ok(RiverCrossing *env)
 {
-    const int rows_pa = env->max_passengers * 2;   /* rows that hold (P,A) pairs */
+    const int rows_pa = env->passengers * 2;   /* rows that hold (P,A) pairs */
 
     /* Loop over every passenger row (even index) */
     for (int p = 0; p < rows_pa; p += 2) {
@@ -164,7 +169,7 @@ static int passenger_agent_conflicts_ok(RiverCrossing *env)
         }
 
         /* --- Each boat ---------------------------------------------------- */
-        for (int b = 0; b < env->max_boats; ++b) {
+        for (int b = 0; b < env->boats; ++b) {
             const int boat_col_idx = BOAT_LOC_COL + b;
             if (OBS(env, p, boat_col_idx) == 1) {
                 const int own_here = OBS(env, a, boat_col_idx);
@@ -198,11 +203,10 @@ void c_reset(RiverCrossing * env) {
     //set up obs [OHE entity type, OHE entity, OHE paired entity, OHE location]
     for (int i = 0; i < env->num_entities; ++i) {
     
-    // Set ENTITY_ID one-hot
-    OBS(env, i, ENTITY_ID_COL + i) = 1;
+   
    
     // Set TYPE and PAIR_ID
-    if (i < env->max_passengers * 2) {
+    if (i < env->passengers * 2) {
         // Passengers are even rows (0, 2, 4...), agents are odd (1, 3, 5...)
         int is_passenger = (i % 2 == 0);
         if (is_passenger) {
@@ -214,22 +218,32 @@ void c_reset(RiverCrossing * env) {
             OBS(env, i, PAIR_ID_COL + (i - 1)) = 1; // pair with passenger above
       
         }
-    } else {
+        // All entities start on the left bank
+        OBS(env, i, LOC_COL + 0) = 1;
+
+        // Set ENTITY_ID one-hot
+        OBS(env, i, ENTITY_ID_COL + i) = 1;
+
+    }  else if ((i < env->max_passengers * 2 + env->boats) && (i >= env->max_passengers * 2)) {
         OBS(env, i, TYPE_COL + 2) = 1; // boat
-       
+
+        // All entities start on the left bank
+        OBS(env, i, LOC_COL + 0) = 1;
+
+        // Set ENTITY_ID one-hot
+        OBS(env, i, ENTITY_ID_COL + i) = 1;
+
         // no pair
     }
-
-    // All entities start on the left bank
-    OBS(env, i, LOC_COL + 0) = 1;
 }
-  
-   
+
+
     env->boat_capacity =2;
     env->tick = 0;
-    env->terminals[0] = 0;
-    env->rewards[0]   = 0.0f;
+
 }
+    
+
 
 // Required Function Step
 
@@ -246,9 +260,15 @@ void c_step(RiverCrossing *env)
 
     env->terminals[0] = 0;
     env->rewards[0]   = 0.0f;
+    env->tick += 1;
+
 
     /* Termination shortcut  */
-    #define FAIL(rew) do {env->rewards[0] = (rew); env->tick += 1; add_log(env); return; } while(0)
+    #define FAIL(rew) do {env->rewards[0] = (rew); add_log(env); return; } while(0)
+
+    if (boat_index < 0 || boat_index >= env->boats) FAIL(-1.0f);
+    if (entity_index < 0 || entity_index >= env->passengers*2 + env->boats) FAIL(-1.0f);
+    if (act_code < UNLOAD || act_code > MOVE) FAIL(-1.0f);
 
     if (act_code == MOVE) {
         /* boat must have at least one occupant */
@@ -268,7 +288,8 @@ void c_step(RiverCrossing *env)
             /* boat not on either bank? invalid */
             FAIL(-1.0f);
         }
-        env->tick += 1;
+     
+
     }
     else if (act_code == LOAD) {
         /* entity must share bank with boat and be boat‑less */
@@ -277,8 +298,7 @@ void c_step(RiverCrossing *env)
         // add entity must not be in a boat condition
 
         if (
-             OBS(env, entity_index, LOC_COL + 2) == 1 || OBS(env, entity_index, BOAT_LOC_COL + boat_index) == 1
-
+             in_a_boat(env, entity_index)
         ) { 
             FAIL(-1.0f);
          }
@@ -296,22 +316,24 @@ void c_step(RiverCrossing *env)
 
         /* load */
 
+        for (int b = 0; b < env->boats; ++b) {
+             OBS(env, entity_index, BOAT_LOC_COL + b) = 0;
+            } // clear all boat locations for entity just in case
+
         OBS(env, entity_index, LOC_COL) = 0;
         OBS(env, entity_index, LOC_COL + 1) = 0;
-        OBS(env, entity_index, LOC_COL + 2) = 1;
         OBS(env, entity_index, BOAT_LOC_COL + boat_index) = 1;
 
         
         env->rewards[0] = 0.2f; // loading gives small reward
-        env->tick += 1;
+       
     }
 
 
     else if (act_code == UNLOAD) {
         /* entity must currently be in that boat */
         if (
-            OBS(env, entity_index, BOAT_LOC_COL + boat_index) != 1 &&
-            OBS(env, entity_index, LOC_COL +2) != 1
+            OBS(env, entity_index, BOAT_LOC_COL + boat_index) != 1
         ) {
             FAIL(-1.0f);
         }
@@ -320,18 +342,20 @@ void c_step(RiverCrossing *env)
         if (OBS(env, boat_r + boat_index, LOC_COL) == 1) {
             OBS(env, entity_index, LOC_COL)  = 1;
             OBS(env, entity_index, LOC_COL + 1) = 0;
+            
            
 
         } else if (OBS(env, boat_r + boat_index, LOC_COL + 1) == 1) {
             OBS(env, entity_index, LOC_COL)  = 0;
             OBS(env, entity_index, LOC_COL + 1) = 1;
+            
 
             env->rewards[0] = 0.2f; // unloading gives small reward but only if on right bank
         } else {
             FAIL(-1.0f);
         }
         OBS(env, entity_index,  BOAT_LOC_COL + boat_index) = 0;
-        env->tick += 1;
+        
     }
     else {
         FAIL(-1.0f); /* invalid action code */
@@ -345,12 +369,14 @@ void c_step(RiverCrossing *env)
         env->rewards[0]   = -1.0f;
         add_log(env);
         c_reset(env);
+        //printf("Passenger-Agent conflict detected!\n");
+       //fflush(stdout);
         return;
     }
 
     /* success if every passenger is on the right bank */
     int success = 1;
-    for (int i = 0; i < env->max_passengers * 2; i += 2) {   // all passenger rows
+    for (int i = 0; i < env->passengers * 2; i += 2) {   // all passenger rows
         if (!OBS(env, i, LOC_COL+1)) {   // not on right bank
             success = 0;
             break;
@@ -361,6 +387,8 @@ void c_step(RiverCrossing *env)
         env->rewards[0]   = 10.0f;
         add_log(env);
         c_reset(env);
+        //printf("All passengers on right bank! Success!\n");
+        //fflush(stdout);
         return;
     }
 

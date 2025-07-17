@@ -27,6 +27,11 @@ class RiverCrossing(pufferlib.PufferEnv):
         Size of obs is:
         3 entity types + num_entites + num_entities + 2 loctions (L/R) and + num_boats locations
         """
+        if passengers > max_passengers:
+            max_passengers = passengers
+
+        if boats > max_boats:
+            max_boats = boats
         num_entities = max_passengers * 2 + max_boats
         obs_shape_length = 3 + num_entities * 2 + 2 + max_boats
 
@@ -82,6 +87,12 @@ class RiverCrossing(pufferlib.PufferEnv):
     def close(self):
         binding.vec_close(self.c_envs)
 
+    def user_input(self):
+        """This is so the user can control the environment from the terminal."""
+        act = input("Action -> Unload (0), Load (1), Move (2):")
+        entity = input("Entity (0 to {}):".format(self.single_action_space.nvec[1] - 1))
+        boat = input("Boat (0 to {}):".format(self.single_action_space.nvec[0] - 1))
+        return np.array([[boat, entity, act]], dtype=np.int32)
 
 if __name__ == '__main__':
     max_ep_steps = 100
@@ -89,10 +100,14 @@ if __name__ == '__main__':
     max_passengers = 1
     max_boats = 1
     boats = 1
-    env = RiverCrossing(passengers=1, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
+    env = RiverCrossing(passengers=passengers, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
     obs, _ = env.reset()
-    print(env.action_space)
     print(obs)
-    print("STOP")
+    """while not env.terminals[0]:
+        env.render()
+        user_act = env.user_input()
+        obs, rewards, terminals, truncations, info = env.step(user_act)
+        print(("Rewards: {}, Terminals: {}, Truncations: {}, Info: {}").format(
+            rewards, terminals, truncations, info))"""
    
 
