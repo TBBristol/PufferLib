@@ -95,19 +95,21 @@ class RiverCrossing(pufferlib.PufferEnv):
         return np.array([[boat, entity, act]], dtype=np.int32)
 
 if __name__ == '__main__':
+    import time
     max_ep_steps = 100
-    passengers = 1
+    passengers = 3
     max_passengers = 1
     max_boats = 1
-    boats = 1
+    boats = 3
     env = RiverCrossing(passengers=passengers, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
     obs, _ = env.reset()
     print(obs)
-    """while not env.terminals[0]:
+    while not env.terminals[0]:
         env.render()
-        user_act = env.user_input()
-        obs, rewards, terminals, truncations, info = env.step(user_act)
+        act = env.action_space.sample()
+        time.sleep(5)
+        obs, rewards, terminals, truncations, info = env.step(act)
         print(("Rewards: {}, Terminals: {}, Truncations: {}, Info: {}").format(
-            rewards, terminals, truncations, info))"""
+            rewards, terminals, truncations, info))
    
 
