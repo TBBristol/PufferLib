@@ -292,8 +292,16 @@ void c_step(RiverCrossing *env)
 
     }
     else if (act_code == LOAD) {
+
+        if (entity_index >= env->passengers * 2) FAIL(-1.0f);  // cannot load/unload boats
+
         /* entity must share bank with boat and be boat‑less */
-        if (OBS(env, entity_index, LOC_COL) != OBS(env, boat_r + boat_index, LOC_COL)) FAIL(-1.0f); //entity and boat not on same bank
+        int boat_row = boat_r + boat_index;
+        int same_bank = 0;
+        if (OBS(env, entity_index, LOC_COL)     && OBS(env, boat_row, LOC_COL))     same_bank = 1;
+        if (OBS(env, entity_index, LOC_COL + 1) && OBS(env, boat_row, LOC_COL + 1)) same_bank = 1;
+        if (!same_bank) FAIL(-1.0f);
+       
 
         // add entity must not be in a boat condition
 
@@ -325,12 +333,15 @@ void c_step(RiverCrossing *env)
         OBS(env, entity_index, BOAT_LOC_COL + boat_index) = 1;
 
         
-        env->rewards[0] = 0.2f; // loading gives small reward
+        //env->rewards[0] = 0.2f; // loading gives small reward
        
     }
 
 
     else if (act_code == UNLOAD) {
+
+        if (entity_index >= env->passengers * 2) FAIL(-1.0f);  // cannot load/unload boats
+
         /* entity must currently be in that boat */
         if (
             OBS(env, entity_index, BOAT_LOC_COL + boat_index) != 1
@@ -350,7 +361,7 @@ void c_step(RiverCrossing *env)
             OBS(env, entity_index, LOC_COL + 1) = 1;
             
 
-            env->rewards[0] = 0.2f; // unloading gives small reward but only if on right bank
+            //env->rewards[0] = 0.2f; // unloading gives small reward but only if on right bank
         } else {
             FAIL(-1.0f);
         }
@@ -376,7 +387,7 @@ void c_step(RiverCrossing *env)
 
     /* success if every passenger is on the right bank */
     int success = 1;
-    for (int i = 0; i < env->passengers * 2; i += 2) {   // all passenger rows
+    for (int i = 0; i < env->passengers * 2; i ++) {   // all passenger rows and all agent rows
         if (!OBS(env, i, LOC_COL+1)) {   // not on right bank
             success = 0;
             break;
@@ -404,32 +415,11 @@ void c_step(RiverCrossing *env)
     /* no termination; step continues */
     return;
 }
-/*============================================================================
-  RiverCrossing Better Render - Option B (Lazy Init + Resizable + Responsive)
-  ----------------------------------------------------------------------------
-  Updated: Fixed HUD text overlapping in top-left corner by introducing a
-  measured, auto-scaling line height and optional background panel. This patch
-  replaces the previous draft in full so you can copy/paste cleanly.
 
-  Selected options (user):
-    • Window lifecycle: Lazy create-on-first-render.
-    • Resizable window: YES (FLAG_WINDOW_RESIZABLE).
-    • Animation: none (snap).
-    • Labels: short (P0/A0/B0...).
-    • HUD: Tick + last reward (auto-stack lines, no overlap).
-    • Auto-scale icons for large envs.
 
-  Integration notes:
-    - Requires your RiverCrossing struct + macros (OBS, LOC_COL, BOAT_LOC_COL,
-      etc.) to be visible. Include the main env header *before* this file or
-      paste these functions into your existing .c (after includes).
-    - The renderer queries env->max_passengers, env->boats, env->boat_capacity,
-      env->tick, env->rewards[0], env->num_entities, env->num_cols.
-    - Color palette is deterministic by pair index.
-    - Boats show occupants according to env observation bits.
-
-  -------------------------------------------------------------------------- */
-
+/* ------------------------------------- */
+/*RENDERING*/
+/* ------------------------------------- */
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -786,74 +776,3 @@ void c_close(RiverCrossing *env)
     }
 }
 
-
-/*--------------------------------------------------*
- *  Simple text-based render (raylib window)        *
- *--------------------------------------------------*/
-
-
-/* one frame of rendering */
-void c_render_OLD(RiverCrossing *env)
-{
-    /* -------------------------------------------------------------------- */
-    /* 1.  Window init / teardown                                           */
-    /* -------------------------------------------------------------------- */
-    if (!IsWindowReady()) {                     /* first call only           */
-        InitWindow(640, 480, "RiverCrossing (PufferLib)");
-        SetTargetFPS(5);                        /* slow enough to watch      */
-    }
-    if (WindowShouldClose() || IsKeyDown(KEY_ESCAPE)) {
-        CloseWindow();
-        return;
-    }
-
-    /* -------------------------------------------------------------------- */
-    /* 2.  Draw the scene                                                   */
-    /* -------------------------------------------------------------------- */
-    BeginDrawing();
-    ClearBackground((Color){24, 24, 24, 255});
-
-    /* Bank headings */
-    DrawText("Left Bank",  40, 40, 20, (Color){200,200,200,255});
-    DrawText("River",     280, 40, 20, (Color){200,200,200,255});
-    DrawText("Right Bank",480, 40, 20, (Color){200,200,200,255});
-
-    int y  = 80;          /* top row for entities */
-    int dy = 20;          /* vertical spacing     */
-
-    int total_entities = env->max_passengers * 2 + env->boats;
-
-    for (int i = 0; i < total_entities; ++i) {
-        /* Build a label --------------------------------------------------- */
-        char buf[64];
-        if (i < env->max_passengers * 2) {
-            if ((i & 1) == 0) {      /* even rows → passenger */
-                sprintf(buf, "Passenger %d", i / 2);
-            } else {                 /* odd  rows → agent     */
-                sprintf(buf, "Agent %d",     i / 2);
-            }
-        } else {                     /* boats are after all P/A rows */
-            sprintf(buf, "Boat %d", i - env->max_passengers * 2);
-        }
-
-        /* Where is this entity? ------------------------------------------ */
-        int x;
-        if (OBS(env, i, LOC_COL) == 1)          x = 40;   /* left bank  */
-        else if (OBS(env, i, LOC_COL + 1) == 1) x = 480;  /* right bank */
-        else                                    x = 280;  /* in a boat  */
-
-        DrawText(buf, x, y, 16, (Color){0, 187, 187, 255});
-        y += dy;
-    }
-
-    EndDrawing();
-}
-/*--------------------------------------------------*
- *  Close                                             *
- *--------------------------------------------------*/
-void c_close_OLD(RiverCrossing *env)
-{
-    if (IsWindowReady()) {
-        CloseWindow();
-    }
-}
