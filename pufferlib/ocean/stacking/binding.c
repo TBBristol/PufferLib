@@ -1,13 +1,13 @@
-#include "crossing.h"
+#include "stacking.h"
 
-#define Env RiverCrossing
+#define Env ContainerStacking
+
 #include "../env_binding.h"
 
 static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
-    env->boats           = unpack(kwargs, "boats");
-    env->passengers      = unpack(kwargs, "passengers");
-    env->max_passengers  = unpack(kwargs, "max_passengers");
-    env->max_boats       = unpack(kwargs, "max_boats");
+    env->max_height = unpack(kwargs, "max_height");
+    env->num_stacks =  unpack(kwargs, "num_stacks");
+    env->num_containers = unpack(kwargs, "num_containers");
     env->max_ep_steps    = unpack(kwargs, "max_ep_steps");
     return 0;
 }

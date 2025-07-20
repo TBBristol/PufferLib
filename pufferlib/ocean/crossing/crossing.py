@@ -97,19 +97,19 @@ class RiverCrossing(pufferlib.PufferEnv):
 if __name__ == '__main__':
     import time
     max_ep_steps = 100
-    passengers = 3
+    passengers = 1
     max_passengers = 1
     max_boats = 1
-    boats = 3
+    boats = 1
     env = RiverCrossing(passengers=passengers, max_boats=max_boats,boats=boats, max_passengers=max_passengers)
     obs, _ = env.reset()
     print(obs)
     while not env.terminals[0]:
         env.render()
-        act = env.action_space.sample()
-        time.sleep(5)
+        act = env.user_input()
         obs, rewards, terminals, truncations, info = env.step(act)
         print(("Rewards: {}, Terminals: {}, Truncations: {}, Info: {}").format(
             rewards, terminals, truncations, info))
    
 
+#TODO eval slower and then check why its getting 6.2 then run mult pairs

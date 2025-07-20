@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "raylib.h"
+#include <stdbool.h>
+#include <time.h>
 
 /* CONSTS */
 
@@ -44,7 +46,7 @@ typedef struct {
     int max_passengers;
     int max_boats;
     int boat_capacity; //default 2 set in reset
-   
+    
     int num_cols; // timesaver
     int num_entities; // timesaver
     int max_ep_steps;
@@ -58,12 +60,32 @@ void add_log(RiverCrossing* env) {
     env->log.n++;
 }
 
-/*--------------------------------------------------*
- *  Internal helpers                                  *
- *--------------------------------------------------*/
+
+
 /* -----------------------------------------------------------
  * Helpers
  * -----------------------------------------------------------*/
+
+ /* Set of paired entities that have made it to the right bank for counting and reward purposes */
+static size_t setsize = 0; 
+static bool   *set = NULL; 
+
+int init_set(RiverCrossing *env)
+{
+    setsize = env->passengers;
+    set = calloc(setsize, sizeof *set);   // zero-initialised
+    return set ? 0 : -1;                  // 0 = success, -1 = out of memory
+}
+
+void add(int x) {
+    if (x >= 0 && x < setsize)
+        set[x] = true;
+}
+
+bool contains(int x) {
+    return (x >= 0 && x < setsize) && set[x];
+}
+
 
 /* Return 1 iff row i is an “agent” (the odd-indexed member of a pair) */
 static inline int is_agent(int i)               { return (i % 2) == 1; }
@@ -78,9 +100,7 @@ static inline int at_col(RiverCrossing *env, int i, int col)
     return OBS(env, i, col) != 0;
 }
 
-/* -----------------------------------------------------------
- * 1 Count agents whose bit @loc_index == value
- * -----------------------------------------------------------*/
+
 static int count_agents_where(RiverCrossing *env, int loc_index, unsigned char value)
 {
     int cnt = 0;
@@ -113,10 +133,6 @@ static int in_a_boat(RiverCrossing *env, int entity_idx)
     return 0;
 }
 
-
-/* -----------------------------------------------------------
- * 2 Count agents currently inside boat <boat_idx>
- * -----------------------------------------------------------*/
 static int count_agents_in_boat(RiverCrossing *env, unsigned char boat_idx)
 {
     return count_agents_where(env, boat_col(env, boat_idx), 1);
@@ -184,6 +200,27 @@ static int passenger_agent_conflicts_ok(RiverCrossing *env)
     return 1;   /* no conflicts found */
 }
 
+
+/*A funct to check if a pair of pass/agent has reached right bank returns 1 if a pair has that has not previously to prevent hacking*/
+
+static int pair_reached_right(RiverCrossing *env) {
+
+    int newly_crossed = 0;
+    for (int p = 0; p < env->passengers*2; p += 2) {
+        if (OBS(env, p, LOC_COL + 1) == 1 && OBS(env, p + 1, LOC_COL + 1) == 1) {
+            int pair = p / 2;
+            if (!contains(pair)) {
+                add(pair);
+                newly_crossed = 1; // a new pair has reached the right bank
+            } 
+        }
+    }
+    return newly_crossed;
+}
+
+
+
+
 // Required function RESET
 
 void c_reset(RiverCrossing * env) {
@@ -237,13 +274,14 @@ void c_reset(RiverCrossing * env) {
     }
 }
 
+    if (!set) init_set(env);
+    memset(set, 0, setsize * sizeof *set); // Reset the set of paired entities that have made it to right bank
 
     env->boat_capacity =2;
     env->tick = 0;
 
-}
+}   
     
-
 
 // Required Function Step
 
@@ -361,7 +399,7 @@ void c_step(RiverCrossing *env)
             OBS(env, entity_index, LOC_COL + 1) = 1;
             
 
-            //env->rewards[0] = 0.2f; // unloading gives small reward but only if on right bank
+            env->rewards[0] += 0.2f; // unloading gives small reward but only if on right bank
         } else {
             FAIL(-1.0f);
         }
@@ -385,6 +423,13 @@ void c_step(RiverCrossing *env)
         return;
     }
 
+    /*Check if a new pair reaches right bank*/ 
+    if (pair_reached_right(env)) {
+        env->rewards[0] += 1.0f; // reward for a pair reaching right bank
+        //printf("A new pair reached the right bank!\n");
+        //fflush(stdout);
+    }
+
     /* success if every passenger is on the right bank */
     int success = 1;
     for (int i = 0; i < env->passengers * 2; i ++) {   // all passenger rows and all agent rows
@@ -395,7 +440,7 @@ void c_step(RiverCrossing *env)
     }
     if (success) {
         env->terminals[0] = 1;
-        env->rewards[0]   = 10.0f;
+        env->rewards[0]   += 10.0f;
         add_log(env);
         c_reset(env);
         //printf("All passengers on right bank! Success!\n");
@@ -410,7 +455,7 @@ void c_step(RiverCrossing *env)
     c_reset(env);
     return;
 }
-
+    
 
     /* no termination; step continues */
     return;
@@ -426,6 +471,9 @@ void c_step(RiverCrossing *env)
 #include <stdbool.h>
 #include <math.h>
 #include "raylib.h"
+
+
+
 
 
 
@@ -652,7 +700,7 @@ void c_render(RiverCrossing *env)
     if (!IsWindowReady()) {
         SetConfigFlags(FLAG_WINDOW_RESIZABLE);
         InitWindow(640, 480, "RiverCrossing (PufferLib)");
-        SetTargetFPS(60);   /* faster; will still be lightweight */
+        SetTargetFPS(3);   /* faster; will still be lightweight */
     }
     if (WindowShouldClose() || IsKeyPressed(KEY_ESCAPE)) {
         CloseWindow();
@@ -761,6 +809,9 @@ void c_render(RiverCrossing *env)
 
     /* Legend if toggled */
     DrawRC_Legend(env, screenW, screenH);
+
+
+    
 
     EndDrawing();
 }

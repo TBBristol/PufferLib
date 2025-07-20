@@ -154,6 +154,7 @@ MAKE_FUNCTIONS = {
     'checkers': 'Checkers',
     'asteroids': 'Asteroids',
     'crossing': 'RiverCrossing',
+    'stacking': 'ContainerStacking',
     'spaces': make_spaces,
     'multiagent': make_multiagent,
 }
