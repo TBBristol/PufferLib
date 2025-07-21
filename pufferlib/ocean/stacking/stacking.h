@@ -4,7 +4,7 @@
 #include "raylib.h"
 #include <stdbool.h>
 #include <time.h>
-
+#include <math.h>
 /* CONSTS */
 
 #define EMPTY_SLOT -1
@@ -322,106 +322,6 @@ void c_step(ContainerStacking *env) {
 }
 
 
-/* Tweak these if you want a different look */
-#define CELL_W          100     // width of each table cell
-#define CELL_H           20     // height of each table cell
-#define OFFSET_X         20     // left margin
-#define OFFSET_Y         20     // top margin
-
-#define HEADER_COLOR     DARKGRAY
-#define CELL_COLOR       BLACK
-#define BG_COLOR         RAYWHITE
-#define STACK_COL_X   (OFFSET_X + 6 * CELL_W + 20)   // x-pos of new column
-
-
-static const char *OBS_HEADERS[6] = {
-    "height%", "next", "top", "lowest", "<top", "unsrt"
-};
-
-
-// Required function. Should handle creating the client on first call
-void c_render_old(ContainerStacking* env) {
-    const int screenW = 800, screenH = 600;
-    if (!IsWindowReady()) {
-        InitWindow(screenW, screenH, "Container-Stacking visualiser");
-        SetTargetFPS(2);
-    }
-
-     // Standard across our envs so exiting is always the same
-    if (IsKeyDown(KEY_ESCAPE)) {
-        exit(0);
-    }
- 
-    BeginDrawing();
-    ClearBackground(BG_COLOR);
-
-    /* ---------- Draw column headers ---------- */
-    for (int f = 0; f < 6; f++) {
-        DrawText(OBS_HEADERS[f],
-                 OFFSET_X + f * CELL_W,
-                 OFFSET_Y,
-                 FONT_SIZE,
-                 HEADER_COLOR);
-    }
-    /* extra header for stack contents */
-    DrawText("stack", STACK_COL_X, OFFSET_Y, FONT_SIZE, HEADER_COLOR);
-
-    /* ---------- Draw each observation row ---------- */
-    for (int s = 0; s < env->num_stacks; s++) {
-        /* Row label “S0”, “S1”, … */
-        char rowLabel[8];
-        snprintf(rowLabel, sizeof rowLabel, "S%d", s);
-        DrawText(rowLabel,
-                 OFFSET_X - 40,
-                 OFFSET_Y + (s + 1) * CELL_H,
-                 FONT_SIZE,
-                 CELL_COLOR);
-
-
-        /* The six float features */
-        for (int f = 0; f < 6; f++) {
-            char buf[16];
-            snprintf(buf, sizeof buf, "%.2f", OBS(env, s, f));
-            DrawText(buf,
-                     OFFSET_X + f * CELL_W,
-                     OFFSET_Y + (s + 1) * CELL_H,
-                     FONT_SIZE,
-                     CELL_COLOR);
-        }
-        /* ---- draw stack contents ---- */
-        char cont[64] = "";
-        for (int h = 0; h < env->max_height; h++) {
-            int v = STACK(env, s, h);
-            if (v == EMPTY_SLOT) break;
-            char tmp[8];
-            snprintf(tmp, sizeof tmp, "%d ", v);
-            strncat(cont, tmp, sizeof cont - strlen(cont) - 1);
-        }
-        DrawText(cont, STACK_COL_X,
-                 OFFSET_Y + (s + 1) * CELL_H,
-                 FONT_SIZE,
-                 CELL_COLOR);
-    }    
-    /* ---------- Remaining-to-stack list ---------- */
-   int listY = OFFSET_Y + (env->num_stacks + 2) * CELL_H;
-    DrawText("Remaining to stack:", OFFSET_X, listY, FONT_SIZE, HEADER_COLOR);
-
-   listY += CELL_H;
-   int listX = OFFSET_X;
-   for (int i = env->next_container; i < env->num_containers; i++) {
-       char num[8];
-       snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
-       DrawText(num, listX, listY, FONT_SIZE, CELL_COLOR);
-      listX += CELL_W / 2;
-      /* wrap to next line if we hit the right edge */
-      if (listX + CELL_W / 2 > screenW) {
-          listX = OFFSET_X;
-          listY += CELL_H;
-       }
-   }
-    EndDrawing();
-}
-
 void c_close(ContainerStacking *env)
 {
     (void)env;
@@ -430,23 +330,34 @@ void c_close(ContainerStacking *env)
     }
 }
 
+void DrawDottedLineH(int x1, int x2, int y, int dotLength, int gapLength, Color color) {
+    for (int x = x1; x < x2; x += dotLength + gapLength) {
+        int end = x + dotLength;
+        if (end > x2) end = x2;
+        DrawLine(x, y, end, y, color);
+    }
+}
+
 #define CELLH 40 //basic sizes to work in
 #define CELLW 40
-#define OFFSET_X 20     // left margin
-#define OFFSET_Y 20     // top margin
+#define MARGIN_X 20     // left margin
+#define MARGIN_Y 20     // top margin
 #define SKYBLUE    CLITERAL(Color){ 102, 191, 255, 255 }   // Sky Blue
 #define WHITE      CLITERAL(Color){ 255, 255, 255, 255 }   // White
-#define FONT_SIZE        20
+#define FONT_SIZE 20
 
 void c_render(ContainerStacking* env) {
 
 
     const int screenW = 800, screenH = 600;
 
+    int centre = screenW /2;
+    
+
 
     if (!IsWindowReady()) {
         InitWindow(screenW, screenH, "PufferLib Stacking");
-        SetTargetFPS(5);
+        SetTargetFPS(0.5);
     }
 
     // Standard across our envs so exiting is always the same
@@ -457,42 +368,93 @@ void c_render(ContainerStacking* env) {
     BeginDrawing();
     ClearBackground((Color){6, 24, 24, 255});
 
-    int remaining_y = screenH - OFFSET_Y - CELLH * 3;
-    int remaining_x = OFFSET_X;
 
+    int remaining_y = screenH - MARGIN_Y - CELLH * 3;
+    int remaining_x = MARGIN_X;
+
+    DrawLine(MARGIN_X, remaining_y -20, screenW - MARGIN_X, remaining_y -20, WHITE);
+
+    DrawDottedLineH(MARGIN_X, screenW - MARGIN_X, remaining_y -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
+    
     for (int i = env->next_container; i < env->num_containers; i++){
 
         DrawRectangle(remaining_x, remaining_y,
         CELLW, CELLH, SKYBLUE);
 
-        int textx = remaining_x +10;
-        int texty = remaining_y -10;
+        int textx = remaining_x +15;
+        int texty = remaining_y +10;
         
         char num[8];
         snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
-        DrawText(num, textx, texty, FONT_SIZE, WHITE);
+        int tw = MeasureText(num, FONT_SIZE);
+        int tx = remaining_x + (CELLW - tw) / 2;    // Center text horizontally in box
+        int ty = remaining_y + (CELLH - FONT_SIZE) / 2;
+        DrawText(num, tx, ty, FONT_SIZE, WHITE);
         
-
-
         remaining_x += CELLW + 20;
-        if (remaining_x >= screenW - OFFSET_X - CELL_W) {
+
+        //printf("rem_x %d", remaining_x);
+        //fflush(stdout);
+
+        if (remaining_x >= screenW - MARGIN_X - CELLW) {
             remaining_y += 20 + CELLH;
-            remaining_x = OFFSET_X;
+            remaining_x = MARGIN_X;
         }
-        if (remaining_y < screenH - OFFSET_Y + CELLH) {
+        if (remaining_y > screenH - MARGIN_Y - CELLH) {
             break;
         }
 
     }
 
+    bool odd = (env->num_stacks % 2) != 0;
+    int half_floor = env->num_stacks / 2;           // e.g. 5 → 2
+    int s_loc_y    = screenH - MARGIN_Y - CELLH * 4 - 20 -2;
+    int s_loc_x;
+    int curr_p;
+    
+    if (odd) {
+            s_loc_x = centre - CELLW/2  - (CELLW +20) * half_floor;
+        }
+        else {
+            s_loc_x = centre - (CELLW +20) * half_floor;
+        }  
 
+    for (int s = 0; s < env->num_stacks; ++s)             
+    {   
+        if (!stack_empty(env,s)){
+            curr_p = STACK(env,s,0);
+        }
+        for (int h = 0; h < find_next_height(env, s); h++) {
+            
 
+            if (STACK(env,s,h) < curr_p) {
+                DrawRectangle(s_loc_x, s_loc_y,
+            CELLW, CELLH, RED);
+            }
+            else {
+                DrawRectangle(s_loc_x, s_loc_y,
+            CELLW, CELLH, SKYBLUE);
+            }
 
+            curr_p = STACK(env,s,h);
 
+            char num[8];
+            snprintf(num, sizeof num, "%d", STACK(env, s, h));
+            int tw = MeasureText(num, FONT_SIZE);
+            int tx = s_loc_x + (CELLW - tw) / 2;    
+            int ty = s_loc_y + (CELLH - FONT_SIZE) / 2;
+            DrawText(num, tx, ty, FONT_SIZE, WHITE);
 
+            s_loc_y -= CELLH + 2;
 
-
-
-    EndDrawing();
+        }
+        s_loc_y = screenH - MARGIN_Y - CELLH * 4 - 20 -2;
+        s_loc_x += CELLW + 20;
+        
+    }
+            
+        EndDrawing();
 
 }
+
+//fflush(stdout);
