@@ -338,6 +338,14 @@ void DrawDottedLineH(int x1, int x2, int y, int dotLength, int gapLength, Color 
     }
 }
 
+void DrawDottedLineV(int y1, int y2, int x, int dotLength, int gapLength, Color color) {
+    for (int y = y1; y < y2; y += dotLength + gapLength) {
+        int end = y + dotLength;
+        if (end > y2) end = y2;
+        DrawLine(x, y, x, end, color);
+    }
+}
+
 #define CELLH 40 //basic sizes to work in
 #define CELLW 40
 #define MARGIN_X 20     // left margin
@@ -357,7 +365,7 @@ void c_render(ContainerStacking* env) {
 
     if (!IsWindowReady()) {
         InitWindow(screenW, screenH, "PufferLib Stacking");
-        SetTargetFPS(0.5);
+        SetTargetFPS(1);
     }
 
     // Standard across our envs so exiting is always the same
@@ -372,9 +380,19 @@ void c_render(ContainerStacking* env) {
     int remaining_y = screenH - MARGIN_Y - CELLH * 3;
     int remaining_x = MARGIN_X;
 
+    int s_loc_x;
+    bool odd = (env->num_stacks % 2) != 0;
+    int half_floor = env->num_stacks / 2;           // e.g. 5 → 2
+
+    if (odd) {
+            s_loc_x = centre - CELLW/2  - (CELLW +20) * half_floor;
+        }
+        else {
+            s_loc_x = centre - (CELLW +20) * half_floor;
+        } 
+
     DrawLine(MARGIN_X, remaining_y -20, screenW - MARGIN_X, remaining_y -20, WHITE);
 
-    DrawDottedLineH(MARGIN_X, screenW - MARGIN_X, remaining_y -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
     
     for (int i = env->next_container; i < env->num_containers; i++){
 
@@ -406,25 +424,33 @@ void c_render(ContainerStacking* env) {
 
     }
 
-    bool odd = (env->num_stacks % 2) != 0;
-    int half_floor = env->num_stacks / 2;           // e.g. 5 → 2
+
     int s_loc_y    = screenH - MARGIN_Y - CELLH * 4 - 20 -2;
-    int s_loc_x;
-    int curr_p;
+
     
-    if (odd) {
-            s_loc_x = centre - CELLW/2  - (CELLW +20) * half_floor;
-        }
-        else {
-            s_loc_x = centre - (CELLW +20) * half_floor;
-        }  
+    int curr_p; //for checking unsorted
+    
+
+    int dot_y = screenH - MARGIN_Y - CELLH * 3 -20;
+    int dot_y_top = dot_y - (2 + CELLW) * env->max_height;
+
 
     for (int s = 0; s < env->num_stacks; ++s)             
     {   
+
+        DrawDottedLineV(dot_y_top, dot_y, s_loc_x, 5,2, SKYBLUE);
+        DrawDottedLineV(dot_y_top, dot_y, s_loc_x + CELLW, 5,2, SKYBLUE);
+        DrawDottedLineH(s_loc_x, s_loc_x + CELLW, remaining_y -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
+
+
+
         if (!stack_empty(env,s)){
             curr_p = STACK(env,s,0);
         }
-        for (int h = 0; h < find_next_height(env, s); h++) {
+
+
+        int height = find_height(env, s);
+        for (int h = 0; h < height; h++) {
             
 
             if (STACK(env,s,h) < curr_p) {
@@ -452,6 +478,8 @@ void c_render(ContainerStacking* env) {
         s_loc_x += CELLW + 20;
         
     }
+    DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, FONT_SIZE, WHITE);
+
             
         EndDrawing();
 

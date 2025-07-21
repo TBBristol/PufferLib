@@ -82,7 +82,7 @@ class ContainerStacking(pufferlib.PufferEnv):
 
   
 if __name__ == '__main__':
-    env = ContainerStacking(num_envs=1,num_stacks = 4,render_mode='human')
+    env = ContainerStacking(num_envs=1,num_stacks = 3,render_mode='human')
     env.reset()
     for _ in range(1000):
         action = env.single_action_space.sample()
