@@ -16,13 +16,25 @@ class ContainerStacking(pufferlib.PufferEnv):
                   log_interval=128, 
                   buf=None, 
                   seed=0):
-         #OBS space is:
-
-        self.single_observation_space = gymnasium.spaces.Box(low = 0.0, 
-                                                             high = num_containers,
-                                                             shape = (num_stacks, 6),
-                                                             dtype = np.float32
-        )
+        """OBS shape = (n_stacks, 6).
+          (1) height%
+          (2) next container priority
+          (3) top container priority
+          (4) lowest remaining priority
+          (5) # of remaining containers with priority < top
+          (6) # of unsorted in this stack"""
+        
+        self.single_observation_space = gymnasium.spaces.Box(low=np.tile(np.array([0, 0, 0, 0, 0, 0], dtype=np.float32), (num_stacks, 1)),
+                                                             high=np.tile(np.array([
+                                                                                    1,                      
+                                                                                    num_containers,        
+                                                                                    num_containers,        
+                                                                                    num_containers,        
+                                                                                    num_containers,       
+                                                                                    max_height - 1         
+                                                                                ], dtype=np.float32), (num_stacks, 1)),
+                                                                                dtype=np.float32
+)
      
         self.single_action_space = gymnasium.spaces.Discrete(num_stacks)
 
@@ -70,12 +82,11 @@ class ContainerStacking(pufferlib.PufferEnv):
 
   
 if __name__ == '__main__':
-   env = ContainerStacking(num_envs=1, render_mode='human')
-   env.reset()
-   for _ in range(1000):
-       action = env.single_action_space.sample()
-       obs, reward, done, truncated, info = env.step(action)
-       env.render()
-       if done or truncated:
-           env.reset()
-
+    env = ContainerStacking(num_envs=1, render_mode='human')
+    env.reset()
+    for _ in range(1000):
+        action = env.single_action_space.sample()
+        obs, reward, done, truncated, info = env.step(action)
+        env.render()
+        if done or truncated:
+            env.reset()

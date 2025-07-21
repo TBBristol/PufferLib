@@ -128,7 +128,7 @@ int count_unsorted_in_stack(ContainerStacking *env, int stack)
     for (int h = 1; h < env->max_height; h++) {
         if (STACK(env, stack, h) == EMPTY_SLOT)      // ⬅ break here
             break;
-        if (STACK(env, stack, h) > STACK(env, stack, h - 1))
+        if (STACK(env, stack, h) < STACK(env, stack, h - 1))
             count++;
     }
     return count;
@@ -143,14 +143,14 @@ int total_unsorted(ContainerStacking *env) {
 }
 
 int lowest_left(ContainerStacking *env) {
-    int lowest = 0; //0 is highest priority
+    int lowest = env->num_containers; // should be one higher than hiest possible generated
 
-    //choice here we still need an obs so if theres none left make it a really low priority
+    //choice here we still need an obs if none left so if theres none left make it a really low priority
     if (env->next_container >= env-> num_containers){
-        return env->num_containers;
+        return 0;
     }
     for (int i = env->next_container; i < env->num_containers; i++) {
-        if (env->container_leaving_priorities[i] > lowest) {
+        if (env->container_leaving_priorities[i] < lowest) {
             lowest = env->container_leaving_priorities[i];
         }
     }
@@ -160,7 +160,7 @@ int lowest_left(ContainerStacking *env) {
 int num_priority_less_than(ContainerStacking *env, int top){
     int count = 0;
     for (int i = env->next_container; i < env->num_containers; i++) {
-        if (env->container_leaving_priorities[i] > top) {
+        if (env->container_leaving_priorities[i] < top) {
             count +=1;
         }
     }
@@ -185,7 +185,7 @@ bool stack_empty(ContainerStacking *env,int stack){
 
 int top_of_stack_priority(ContainerStacking *env,int stack){
     if (stack_empty(env,stack)){
-        return env->num_containers;
+        return 0; //effectively lowest priority so we want to stack here
     }
     return STACK(env, stack, find_next_height(env, stack) -1);
 }
@@ -222,7 +222,7 @@ float* generate_obs(ContainerStacking *env){
 
 void c_reset(ContainerStacking *env) {
 
-    srand(((uintptr_t)env) ^ time(NULL)); //different seed per env and reset
+    //srand(((uintptr_t)env) ^ time(NULL)); //different seed per env and reset
   
     initialise_stacks(env);
 
@@ -254,6 +254,8 @@ void c_step(ContainerStacking *env) {
     env->rewards[0]   = 0.0f;
     env->tick += 1;
 
+    //check max steps exceeded
+
     if (env->tick >= env->max_ep_steps) {
     env->terminals[0] = 1;
     env->rewards[0] = -1.0f;
@@ -262,18 +264,35 @@ void c_step(ContainerStacking *env) {
     return;
 }
 
+    // Check if last container has been placed
+    if (env->next_container >= env->num_containers) {
+        env->terminals[0] = 1;
+        env-> rewards[0] = 0; 
+        add_log(env);
+        c_reset(env);
+        return;
+    }
+
     int stack = env->actions[0]; // action is the stack to place the container in
     int old_unsorted = env-> unsorted;
     int container_priority = env->container_leaving_priorities[env->next_container];
-  
-    /* Termination shortcut  */
-    #define FAIL(rew) do {env->rewards[0] = (rew); env->terminals[0] = 1; add_log(env); return; } while(0)
 
-    if (stack < 0 || stack >= env->num_stacks)  FAIL(-1.0f);
+
+    if (stack < 0 || stack >= env->num_stacks)  {
+        env->terminals[0] = 1;
+        env-> rewards[0] = -10.0f; 
+        add_log(env);
+        c_reset(env);
+        return;
+    }
 
     // Check if stack is valid
     if (!free_space(env, stack)){
-        FAIL(-1.0f);
+        env->terminals[0] = 1;
+        env-> rewards[0] = -10.0f; 
+        add_log(env);
+        c_reset(env);
+        return;
     }
 
     //Place container
@@ -294,14 +313,10 @@ void c_step(ContainerStacking *env) {
 
     // Set reward 
     env-> rewards[0] = (float) (old_unsorted - env->unsorted); // reward is the change in unsorted containers
-    
-    // Check if last container has been placed
-    if (env->next_container >= env->num_containers) {
-        env->terminals[0] = 1;
-        env-> rewards[0] += 10.0f; // extra reward for finishing
-        add_log(env);
-    }
+    //printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
+    //fflush(stdout);
 
+ 
     /* no termination; step continues */
     return;
 }
@@ -312,7 +327,7 @@ void c_step(ContainerStacking *env) {
 #define CELL_H           20     // height of each table cell
 #define OFFSET_X         20     // left margin
 #define OFFSET_Y         20     // top margin
-#define FONT_SIZE        18
+
 #define HEADER_COLOR     DARKGRAY
 #define CELL_COLOR       BLACK
 #define BG_COLOR         RAYWHITE
@@ -325,11 +340,11 @@ static const char *OBS_HEADERS[6] = {
 
 
 // Required function. Should handle creating the client on first call
-void c_render(ContainerStacking* env) {
+void c_render_old(ContainerStacking* env) {
     const int screenW = 800, screenH = 600;
     if (!IsWindowReady()) {
         InitWindow(screenW, screenH, "Container-Stacking visualiser");
-        SetTargetFPS(5);
+        SetTargetFPS(2);
     }
 
      // Standard across our envs so exiting is always the same
@@ -413,4 +428,71 @@ void c_close(ContainerStacking *env)
     if (IsWindowReady()) {
         CloseWindow();
     }
+}
+
+#define CELLH 40 //basic sizes to work in
+#define CELLW 40
+#define OFFSET_X 20     // left margin
+#define OFFSET_Y 20     // top margin
+#define SKYBLUE    CLITERAL(Color){ 102, 191, 255, 255 }   // Sky Blue
+#define WHITE      CLITERAL(Color){ 255, 255, 255, 255 }   // White
+#define FONT_SIZE        20
+
+void c_render(ContainerStacking* env) {
+
+
+    const int screenW = 800, screenH = 600;
+
+
+    if (!IsWindowReady()) {
+        InitWindow(screenW, screenH, "PufferLib Stacking");
+        SetTargetFPS(5);
+    }
+
+    // Standard across our envs so exiting is always the same
+    if (IsKeyDown(KEY_ESCAPE)) {
+        exit(0);
+    }
+
+    BeginDrawing();
+    ClearBackground((Color){6, 24, 24, 255});
+
+    int remaining_y = screenH - OFFSET_Y - CELLH * 3;
+    int remaining_x = OFFSET_X;
+
+    for (int i = env->next_container; i < env->num_containers; i++){
+
+        DrawRectangle(remaining_x, remaining_y,
+        CELLW, CELLH, SKYBLUE);
+
+        int textx = remaining_x +10;
+        int texty = remaining_y -10;
+        
+        char num[8];
+        snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
+        DrawText(num, textx, texty, FONT_SIZE, WHITE);
+        
+
+
+        remaining_x += CELLW + 20;
+        if (remaining_x >= screenW - OFFSET_X - CELL_W) {
+            remaining_y += 20 + CELLH;
+            remaining_x = OFFSET_X;
+        }
+        if (remaining_y < screenH - OFFSET_Y + CELLH) {
+            break;
+        }
+
+    }
+
+
+
+
+
+
+
+
+
+    EndDrawing();
+
 }
