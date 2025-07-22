@@ -438,9 +438,9 @@ void c_render(ContainerStacking* env) {
     for (int s = 0; s < env->num_stacks; ++s)             
     {   
 
-        DrawDottedLineV(dot_y_top, dot_y, s_loc_x, 5,2, SKYBLUE);
-        DrawDottedLineV(dot_y_top, dot_y, s_loc_x + CELLW, 5,2, SKYBLUE);
-        DrawDottedLineH(s_loc_x, s_loc_x + CELLW, remaining_y -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
+        DrawDottedLineV(dot_y_top, dot_y, s_loc_x +1, 5,2, SKYBLUE);
+        DrawDottedLineV(dot_y_top, dot_y, s_loc_x + CELLW -1, 5,2, SKYBLUE);
+        DrawDottedLineH(s_loc_x +1 , s_loc_x -1 + CELLW, remaining_y -1 -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
 
 
 
