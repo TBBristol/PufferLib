@@ -1,3 +1,8 @@
+/* Based on Jin, X., Duan, Z., Song, W., Li, Q., 2023. Container stacking optimization based on Deep Reinforcement Learning. 
+Engineering Applications of Artificial Intelligence 123, 106508. https://doi.org/10.1016/j.engappai.2023.106508
+*/
+
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -5,6 +10,10 @@
 #include <stdbool.h>
 #include <time.h>
 #include <math.h>
+
+
+
+
 /* CONSTS */
 
 #define EMPTY_SLOT -1
@@ -346,17 +355,42 @@ void DrawDottedLineV(int y1, int y2, int x, int dotLength, int gapLength, Color 
     }
 }
 
-#define CELLH 40 //basic sizes to work in
-#define CELLW 40
 #define MARGIN_X 20     // left margin
 #define MARGIN_Y 20     // top margin
 #define SKYBLUE    CLITERAL(Color){ 102, 191, 255, 255 }   // Sky Blue
 #define WHITE      CLITERAL(Color){ 255, 255, 255, 255 }   // White
-#define FONT_SIZE 20
+
 
 void c_render(ContainerStacking* env) {
 
-
+    int gap;
+    int cellw;
+    int cellh;
+    int font_size;
+  
+if (env->num_stacks > 50 || env->max_height > 40) {
+    printf("WARNING: num_stacks or max_height too big for render must be env->num_stacks <= 49 and env->max_height <= 39\n");
+    fflush(stdout);
+    return;
+}
+    
+else if (env->num_stacks > 24 || env->max_height > 20) {
+    gap = 5;
+    cellw = cellh = 10;
+    font_size = 8;
+}
+else if (env->num_stacks > 12 || env->max_height > 9) {
+    gap = 10;
+    cellw = cellh = 20;
+    font_size = 12;
+}
+else {
+    gap = 20;
+    cellw = cellh = 40;
+    font_size = 20;
+}
+    
+   
     const int screenW = 800, screenH = 600;
 
     int centre = screenW /2;
@@ -374,10 +408,11 @@ void c_render(ContainerStacking* env) {
     }
 
     BeginDrawing();
+    Font font = GetFontDefault();
     ClearBackground((Color){6, 24, 24, 255});
 
 
-    int remaining_y = screenH - MARGIN_Y - CELLH * 3;
+    int remaining_y = screenH - MARGIN_Y - cellh * 3;
     int remaining_x = MARGIN_X;
 
     int s_loc_x;
@@ -385,62 +420,70 @@ void c_render(ContainerStacking* env) {
     int half_floor = env->num_stacks / 2;           // e.g. 5 → 2
 
     if (odd) {
-            s_loc_x = centre - CELLW/2  - (CELLW +20) * half_floor;
+            s_loc_x = centre - cellw/2  - (cellw + gap) * half_floor;
         }
         else {
-            s_loc_x = centre - (CELLW +20) * half_floor;
+            s_loc_x = centre - (cellw + gap) * half_floor;
         } 
 
-    DrawLine(MARGIN_X, remaining_y -20, screenW - MARGIN_X, remaining_y -20, WHITE);
+    DrawLine(MARGIN_X, remaining_y - gap, screenW - MARGIN_X, remaining_y - gap, WHITE);
 
     
     for (int i = env->next_container; i < env->num_containers; i++){
 
         DrawRectangle(remaining_x, remaining_y,
-        CELLW, CELLH, SKYBLUE);
+        cellw, cellh, SKYBLUE);
 
-        int textx = remaining_x +15;
-        int texty = remaining_y +10;
-        
         char num[8];
         snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
-        int tw = MeasureText(num, FONT_SIZE);
-        int tx = remaining_x + (CELLW - tw) / 2;    // Center text horizontally in box
-        int ty = remaining_y + (CELLH - FONT_SIZE) / 2;
-        DrawText(num, tx, ty, FONT_SIZE, WHITE);
+        Vector2 size = MeasureTextEx(font, num, (float)font_size, 1.0f);
+        int tx = remaining_x + (int)((cellw - size.x) / 2.0f);
+        int ty = remaining_y + (int)((cellh - size.y) / 2.0f);
+        DrawTextEx(font, num, (Vector2){ tx, ty }, (float)font_size, 1.0f, WHITE);
         
-        remaining_x += CELLW + 20;
+        /*
+        char num[8];
+        snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
+        int tw = MeasureText(num, font_size);
+        int tx = remaining_x + (cellw - tw) / 2;    // Center text horizontally in box
+        int ty = remaining_y + (cellh - font_size) / 2;
+        DrawText(num, tx, ty, font_size, WHITE); */
+        
+        remaining_x += cellw + gap;
 
         //printf("rem_x %d", remaining_x);
         //fflush(stdout);
 
-        if (remaining_x >= screenW - MARGIN_X - CELLW) {
-            remaining_y += 20 + CELLH;
+        if (remaining_x >= screenW - MARGIN_X - cellw) {
+            remaining_y += gap + cellh;
             remaining_x = MARGIN_X;
         }
-        if (remaining_y > screenH - MARGIN_Y - CELLH) {
+        if (remaining_y > screenH - MARGIN_Y - cellh) {
+            DrawCircle(remaining_x + 3, remaining_y, 3, SKYBLUE);
+            DrawCircle(remaining_x + 15, remaining_y, 3, SKYBLUE);
+            DrawCircle(remaining_x + 27, remaining_y, 3, SKYBLUE);
             break;
         }
 
     }
 
 
-    int s_loc_y    = screenH - MARGIN_Y - CELLH * 4 - 20 -2;
+    int s_loc_y    = screenH - MARGIN_Y - cellh * 4 - gap -2;
 
     
     int curr_p; //for checking unsorted
     
 
-    int dot_y = screenH - MARGIN_Y - CELLH * 3 -20;
-    int dot_y_top = dot_y - (2 + CELLW) * env->max_height;
+    int dot_y = screenH - MARGIN_Y - cellh * 3 - gap;
+    int dot_y_top = dot_y - (2 + cellw) * env->max_height -1;
 
 
     for (int s = 0; s < env->num_stacks; ++s)             
     {   
 
         DrawDottedLineV(dot_y_top, dot_y, s_loc_x +1, 5,2, SKYBLUE);
-        DrawDottedLineV(dot_y_top, dot_y, s_loc_x + CELLW -1, 5,2, SKYBLUE);
-        DrawDottedLineH(s_loc_x +1 , s_loc_x -1 + CELLW, remaining_y -1 -20 - (2 + CELLW) * env->max_height, 5, 2, SKYBLUE);
+        DrawDottedLineV(dot_y_top, dot_y, s_loc_x + cellw -1, 5,2, SKYBLUE);
+        DrawDottedLineH(s_loc_x +1 , s_loc_x -1 + cellw, dot_y_top, 5, 2, SKYBLUE);
 
 
 
@@ -455,30 +498,38 @@ void c_render(ContainerStacking* env) {
 
             if (STACK(env,s,h) < curr_p) {
                 DrawRectangle(s_loc_x, s_loc_y,
-            CELLW, CELLH, RED);
+            cellw, cellh, RED);
             }
             else {
                 DrawRectangle(s_loc_x, s_loc_y,
-            CELLW, CELLH, SKYBLUE);
+            cellw, cellh, SKYBLUE);
             }
 
             curr_p = STACK(env,s,h);
 
             char num[8];
             snprintf(num, sizeof num, "%d", STACK(env, s, h));
-            int tw = MeasureText(num, FONT_SIZE);
-            int tx = s_loc_x + (CELLW - tw) / 2;    
-            int ty = s_loc_y + (CELLH - FONT_SIZE) / 2;
-            DrawText(num, tx, ty, FONT_SIZE, WHITE);
+            Vector2 size = MeasureTextEx(font, num, (float)font_size, 1.0f);
+            int tx = s_loc_x + (int)((cellw - size.x) / 2.0f);
+            int ty = s_loc_y + (int)((cellh - size.y) / 2.0f);
+            DrawTextEx(font, num, (Vector2){ tx, ty }, (float)font_size, 1.0f, WHITE);
 
-            s_loc_y -= CELLH + 2;
+            /*
+            char num[8];
+            snprintf(num, sizeof num, "%d", STACK(env, s, h));
+            int tw = MeasureText(num, font_size);
+            int tx = s_loc_x + (cellw - tw) / 2;    
+            int ty = s_loc_y + (cellh - font_size) / 2;
+            DrawText(num, tx, ty, font_size, WHITE);*/
+
+            s_loc_y -= cellh + 2;
 
         }
-        s_loc_y = screenH - MARGIN_Y - CELLH * 4 - 20 -2;
-        s_loc_x += CELLW + 20;
+        s_loc_y = screenH - MARGIN_Y - cellh * 4 - gap -2;
+        s_loc_x += cellw + gap;
         
     }
-    DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, FONT_SIZE, WHITE);
+    DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, font_size, WHITE);
 
             
         EndDrawing();
