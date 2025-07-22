@@ -47,6 +47,9 @@ typedef struct {
     int next_container;
     int *container_leaving_priorities; // ptr to array of priorities for each container
     int *stacks; // ptr to array of stacks, each stack is an array of ints of size max_height
+    float reward_us;
+    float reward_max_breach;
+    bool reset_max_breach;
 }ContainerStacking;
 
 void add_log(ContainerStacking* env) {
@@ -287,7 +290,7 @@ void c_step(ContainerStacking *env) {
     int container_priority = env->container_leaving_priorities[env->next_container];
 
 
-    if (stack < 0 || stack >= env->num_stacks)  {
+    if (stack < 0 || stack >= env->num_stacks)  { //shouldn't ever hit this
         env->terminals[0] = 1;
         env-> rewards[0] = -10.0f; 
         add_log(env);
@@ -298,9 +301,11 @@ void c_step(ContainerStacking *env) {
     // Check if stack is valid
     if (!free_space(env, stack)){
         env->terminals[0] = 1;
-        env-> rewards[0] = -10.0f; 
+        env-> rewards[0] = env->reward_max_breach; 
         add_log(env);
+        if (env->reset_max_breach) {
         c_reset(env);
+    }
         return;
     }
 
@@ -441,17 +446,9 @@ else {
         int ty = remaining_y + (int)((cellh - size.y) / 2.0f);
         DrawTextEx(font, num, (Vector2){ tx, ty }, (float)font_size, 1.0f, WHITE);
         
-        /*
-        char num[8];
-        snprintf(num, sizeof num, "%d", env->container_leaving_priorities[i]);
-        int tw = MeasureText(num, font_size);
-        int tx = remaining_x + (cellw - tw) / 2;    // Center text horizontally in box
-        int ty = remaining_y + (cellh - font_size) / 2;
-        DrawText(num, tx, ty, font_size, WHITE); */
-        
+    
         remaining_x += cellw + gap;
 
-        //printf("rem_x %d", remaining_x);
         //fflush(stdout);
 
         if (remaining_x >= screenW - MARGIN_X - cellw) {
@@ -514,14 +511,6 @@ else {
             int ty = s_loc_y + (int)((cellh - size.y) / 2.0f);
             DrawTextEx(font, num, (Vector2){ tx, ty }, (float)font_size, 1.0f, WHITE);
 
-            /*
-            char num[8];
-            snprintf(num, sizeof num, "%d", STACK(env, s, h));
-            int tw = MeasureText(num, font_size);
-            int tx = s_loc_x + (cellw - tw) / 2;    
-            int ty = s_loc_y + (cellh - font_size) / 2;
-            DrawText(num, tx, ty, font_size, WHITE);*/
-
             s_loc_y -= cellh + 2;
 
         }
@@ -536,4 +525,3 @@ else {
 
 }
 
-//fflush(stdout);
