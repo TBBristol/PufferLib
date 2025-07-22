@@ -279,7 +279,7 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env-> rewards[0] = 0; 
+        env-> rewards[0] = env->unsorted; 
         add_log(env);
         c_reset(env);
         return;
@@ -302,9 +302,10 @@ void c_step(ContainerStacking *env) {
     if (!free_space(env, stack)){
         env->terminals[0] = 1;
         env-> rewards[0] = env->reward_max_breach; 
-        add_log(env);
+ 
         if (env->reset_max_breach) {
         c_reset(env);
+        add_log(env);
     }
         return;
     }
