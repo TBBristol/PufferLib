@@ -270,7 +270,7 @@ void c_step(ContainerStacking *env) {
 
     if (env->tick >= env->max_ep_steps) {
     env->terminals[0] = 1;
-    env->rewards[0] = -1.0f;
+    env->rewards[0] = env->reward_max_breach; //penalises for total poss US - 1  to avoid it cheating
     add_log(env);
     c_reset(env);
     return;
@@ -279,7 +279,7 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env-> rewards[0] = env->unsorted; 
+        env-> rewards[0] = -env->unsorted;  //this is output as score on term so it should be total unsorted neg
         add_log(env);
         c_reset(env);
         return;
@@ -292,7 +292,9 @@ void c_step(ContainerStacking *env) {
 
     if (stack < 0 || stack >= env->num_stacks)  { //shouldn't ever hit this
         env->terminals[0] = 1;
-        env-> rewards[0] = -10.0f; 
+        env-> rewards[0] = -100.0f;
+        printf("ENV ACTION ERROR HIT");
+        fflush(stdout);
         add_log(env);
         c_reset(env);
         return;
@@ -301,8 +303,7 @@ void c_step(ContainerStacking *env) {
     // Check if stack is valid
     if (!free_space(env, stack)){
         env->terminals[0] = 1;
-        env-> rewards[0] = env->reward_max_breach; 
- 
+        env-> rewards[0] = env->reward_max_breach; //penalises for total poss US - 1  to avoid it cheating
         if (env->reset_max_breach) {
         c_reset(env);
         add_log(env);

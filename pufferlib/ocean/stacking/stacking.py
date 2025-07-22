@@ -13,7 +13,7 @@ class ContainerStacking(pufferlib.PufferEnv):
                  num_stacks = None,
                   max_ep_steps = 100,
                   reward_us = -1,
-                  reward_max_breach = -10,
+                  reward_max_breach = None,
                   reset_max_breach = 1,
                   num_envs=1, 
                   render_mode=None, 
@@ -30,7 +30,10 @@ class ContainerStacking(pufferlib.PufferEnv):
         
         if not num_stacks:
             num_stacks = math.ceil(num_containers/max_height)
-        
+        if not reward_max_breach:
+            reward_max_breach = -(max_height -1 *num_stacks) - 1 
+            #This is max unsorted so we penalise bigger to avoid it opting to cheat
+
         self.single_observation_space = gymnasium.spaces.Box(low=np.tile(np.array([0, 0, 0, 0, 0, 0], dtype=np.float32), (num_stacks, 1)),
                                                              high=np.tile(np.array([
                                                                                     1,                      
