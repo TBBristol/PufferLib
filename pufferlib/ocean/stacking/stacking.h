@@ -384,7 +384,7 @@ if (env->num_stacks > 50 || env->max_height > 40) {
 else if (env->num_stacks > 24 || env->max_height > 20) {
     gap = 5;
     cellw = cellh = 10;
-    font_size = 8;
+    font_size = 4;
 }
 else if (env->num_stacks > 12 || env->max_height > 9) {
     gap = 10;
@@ -521,6 +521,8 @@ else {
         
     }
     DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, font_size, WHITE);
+    DrawText(TextFormat("Stack: %i", env->actions[0]), 20, 40, font_size, WHITE);
+
 
             
         EndDrawing();
