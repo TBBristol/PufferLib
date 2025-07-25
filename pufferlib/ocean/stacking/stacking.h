@@ -310,12 +310,12 @@ void c_step(ContainerStacking *env) {
     // Check if stack is valid
     if (!free_space(env, stack)){
         env->terminals[0] = 1;
-        env-> rewards[0] = env->reward_max_breach; //penalises for total poss US - 1  to avoid it cheating
-        if (env->reset_max_breach) {
-        c_reset(env);
-        add_log(env);
-    }
-        return;
+        env-> rewards[0] = -1.0f; // neg reward for not placing a container
+        //if (env->reset_max_breach) {
+        //c_reset(env);
+        ///add_log(env);
+    //}
+      //  return;
     }
 
     //Place container
@@ -335,10 +335,11 @@ void c_step(ContainerStacking *env) {
     generate_obs(env);
 
     // Set reward 
-    env-> rewards[0] = (float) (old_unsorted - env->unsorted); // reward is the change in unsorted containers
+    env-> rewards[0] = (float) (old_unsorted - env->unsorted); // effectively -1 for placing an US
     //printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
     //fflush(stdout);
 
+    env->rewards[0] += 1.0f; //one reward for placing a container
  
     /* no termination; step continues */
     return;
