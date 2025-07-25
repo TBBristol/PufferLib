@@ -95,11 +95,20 @@ class ContainerStacking(pufferlib.PufferEnv):
 
   
 if __name__ == '__main__':
-    env = ContainerStacking(num_envs=1, num_containers=51,max_height = 5, render_mode='human')
+    env = ContainerStacking(num_envs=1, num_containers=10,num_stacks=3,max_height = 5)
     env.reset()
     for _ in range(1000):
         action = env.single_action_space.sample()
         obs, reward, done, truncated, info = env.step(action)
-        env.render()
+        #print(obs)
+        #env.render()
         if done or truncated:
             env.reset()
+
+            """OBS shape = (n_stacks, 6).
+          (1) height%
+          (2) next container priority
+          (3) top container priority
+          (4) lowest remaining priority
+          (5) # of remaining containers with priority < top
+          (6) # of unsorted in this stack"""

@@ -9,20 +9,29 @@
 #include "stacking.h"
 
 int main() {
-    ContainerStacking env = {.num_containers = 10, 
-                            .max_ep_steps = 100};
-                        
+    ContainerStacking env = {.num_containers = 30, 
+                            .max_ep_steps = 100,
+                                      .max_height = 4,
+                                    .num_stacks = 8,
+                                        .reward_max_breach = -23,
+                                        .reset_max_breach =1};
    
-   // env.observations = (int*)calloc(env.num_entities * env.num_cols, sizeof(int));
-    //env.actions = (int*)calloc(3, sizeof(int));
+    env.observations = (float*)calloc(env.num_stacks * env.max_height, sizeof(float));
+    env.actions = (int*)calloc(8, sizeof(int));
     env.rewards = (float*)calloc(1, sizeof(float));
     env.terminals = (unsigned char*)calloc(1, sizeof(unsigned char));
+    
+    
+    int acts = 5;
 
     c_reset(&env);
-    c_render(&env);
-    for (int frame = 0; frame < 60 && !WindowShouldClose(); ++frame) {
-    c_render(&env);
-}
+    //c_render(&env);
+    while (acts >= 0){
+    env.actions[0] = rand() % 8;
+    c_step(&env);
+
+    }
+
     free(env.observations);
     free(env.actions);
     free(env.rewards);

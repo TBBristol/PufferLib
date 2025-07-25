@@ -11,9 +11,6 @@ Engineering Applications of Artificial Intelligence 123, 106508. https://doi.org
 #include <time.h>
 #include <math.h>
 
-
-
-
 /* CONSTS */
 
 #define EMPTY_SLOT -1
@@ -202,6 +199,11 @@ int top_of_stack_priority(ContainerStacking *env,int stack){
     return STACK(env, stack, find_next_height(env, stack) -1);
 }
 
+float linear_norm(int x, int xmax,int  xmin) {
+
+    return (float) ((float) (x - xmin)/(float) (xmax-xmin));
+}
+
 float* generate_obs(ContainerStacking *env){
     
     int lowest_remaining = lowest_left(env);
@@ -219,12 +221,16 @@ float* generate_obs(ContainerStacking *env){
 
         int stack_unsorted = count_unsorted_in_stack(env, s);
 
+        
+        //printf("unsorted %d \n", stack_unsorted);
+        //fflush(stdout);
+
         OBS(env, s, 0) = height_percent;
-        OBS(env, s, 1) = nxt_container_priority;
-        OBS(env, s, 2) = top_prior;
-        OBS(env, s, 3) = lowest_remaining;
-        OBS(env, s, 4) = num_less_than_top;
-        OBS(env, s, 5) = stack_unsorted;
+        OBS(env, s, 1) = linear_norm(nxt_container_priority, 0, env->num_containers-1);
+        OBS(env, s, 2) = linear_norm(top_prior, 0, env->num_containers-1);
+        OBS(env, s, 3) = linear_norm(lowest_remaining, 0, env->num_containers-1);
+        OBS(env, s, 4) = linear_norm(num_less_than_top, 0, env->num_containers-1);
+        OBS(env, s, 5) = linear_norm(stack_unsorted, env->max_height-1, 0);
     }
     return env->observations;
 }
@@ -279,7 +285,8 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env-> rewards[0] = -env->unsorted;  //this is output as score on term so it should be total unsorted neg
+        env->rewards[0] = env->num_containers - env->num_stacks; //so max US would turn this to zero
+        env-> rewards[0] += -env->unsorted;  //this is output as score on term so it should be total unsorted neg
         add_log(env);
         c_reset(env);
         return;
@@ -406,7 +413,7 @@ else {
 
     if (!IsWindowReady()) {
         InitWindow(screenW, screenH, "PufferLib Stacking");
-        SetTargetFPS(1);
+        SetTargetFPS(10);
     }
 
     // Standard across our envs so exiting is always the same
