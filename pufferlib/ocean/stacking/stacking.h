@@ -285,8 +285,9 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env->rewards[0] = env->num_containers - env->num_stacks; //so max US would turn this to zero
-        env-> rewards[0] += -env->unsorted;  //this is output as score on term so it should be total unsorted neg
+        env->rewards[0] = 10.0f; //changed since we now penalise for unsorted every turn
+        //env->rewards[0] = env->num_containers - env->num_stacks; //so max US would turn this to zero
+       // env-> rewards[0] += -env->unsorted;  //this is output as score on term so it should be total unsorted neg
         add_log(env);
         c_reset(env);
         return;
