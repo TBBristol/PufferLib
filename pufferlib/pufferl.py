@@ -865,6 +865,8 @@ class WandbLogger:
  
 def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     args = args or load_config(env_name)
+    
+   
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if 'LOCAL_RANK' in os.environ:
@@ -1192,7 +1194,7 @@ def main():
     err = 'Usage: puffer [train, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info'
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
-
+   
     mode = sys.argv.pop(1)
     env_name = sys.argv.pop(1)
     if mode == 'train':

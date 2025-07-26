@@ -23,7 +23,8 @@ typedef struct {
     float score; // Recommended unnormalized single real number perf metric
     float episode_return; // Recommended metric: sum of agent rewards over episode
     float episode_length; // Recommended metric: number of steps of agent episode
-    int num_invalids;
+    float num_invalids;
+    float unsorteds;
     // Any extra fields you add here may be exported to Python in binding.c
     float n; // Required as the last field 
 } Log;
@@ -55,6 +56,7 @@ void add_log(ContainerStacking* env) {
     env->log.score += env->rewards[0];
     env->log.episode_length += env->tick;
     env->log.episode_return += env->rewards[0];
+    env->log.unsorteds += (float) env->unsorted;
     env->log.n++;
 }
 
@@ -253,7 +255,7 @@ void c_reset(ContainerStacking *env) {
     env->tick = 0;
     env->unsorted = 0;
     env-> next_container = 0;
-    env->log.num_invalids = 0;
+    env->log.num_invalids = 0.0f;
 
 }   
     
@@ -288,6 +290,7 @@ void c_step(ContainerStacking *env) {
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
         env->rewards[0] = 10.0f; //changed since we now penalise for unsorted every turn
+        env->rewards[0] -= env->unsorted;
         //env->rewards[0] = env->num_containers - env->num_stacks; //so max US would turn this to zero
        // env-> rewards[0] += -env->unsorted;  //this is output as score on term so it should be total unsorted neg
         add_log(env);
@@ -314,10 +317,9 @@ void c_step(ContainerStacking *env) {
     if (!free_space(env, stack)){
         //env->terminals[0] = 1;
         env->rewards[0] = -1.0f; // neg reward for not placing a container
-        env->log.num_invalids += 1;
+        env->log.num_invalids += 1.0f;
         //if (env->reset_max_breach) {
         //c_reset(env);
-        add_log(env);
     //}
         return;
     }
@@ -344,9 +346,8 @@ void c_step(ContainerStacking *env) {
     //fflush(stdout);
 
     env->rewards[0] += 1.0f; //one reward for placing a container
-    add_log(env);
+
     /* no termination; step continues */
-    return;
 }
 
 
