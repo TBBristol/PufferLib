@@ -310,7 +310,7 @@ void c_step(ContainerStacking *env) {
 
     // Check if stack is valid
     if (!free_space(env, stack)){
-        env->terminals[0] = 1;
+        //env->terminals[0] = 1;
         env-> rewards[0] = -1.0f; // neg reward for not placing a container
         //if (env->reset_max_breach) {
         //c_reset(env);
