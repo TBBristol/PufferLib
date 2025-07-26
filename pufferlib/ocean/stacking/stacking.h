@@ -118,7 +118,7 @@ int find_next_height(ContainerStacking *env,int stack) {
         if (STACK(env, stack, h) == EMPTY_SLOT) {
             return h;
         }
-    }
+    }   
     return -1;
 }
 
@@ -316,7 +316,7 @@ void c_step(ContainerStacking *env) {
         //c_reset(env);
         ///add_log(env);
     //}
-      //  return;
+        return;
     }
 
     //Place container
