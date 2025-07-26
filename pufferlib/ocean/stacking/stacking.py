@@ -1,4 +1,3 @@
-'''A simple sample environment. Use this as a template for your own envs.'''
 
 import gymnasium
 import numpy as np
