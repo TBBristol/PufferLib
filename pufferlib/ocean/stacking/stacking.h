@@ -23,6 +23,7 @@ typedef struct {
     float score; // Recommended unnormalized single real number perf metric
     float episode_return; // Recommended metric: sum of agent rewards over episode
     float episode_length; // Recommended metric: number of steps of agent episode
+    int num_invalids;
     // Any extra fields you add here may be exported to Python in binding.c
     float n; // Required as the last field 
 } Log;
@@ -252,6 +253,7 @@ void c_reset(ContainerStacking *env) {
     env->tick = 0;
     env->unsorted = 0;
     env-> next_container = 0;
+    env->log.num_invalids = 0;
 
 }   
     
@@ -311,10 +313,11 @@ void c_step(ContainerStacking *env) {
     // Check if stack is valid
     if (!free_space(env, stack)){
         //env->terminals[0] = 1;
-        env-> rewards[0] = -1.0f; // neg reward for not placing a container
+        env->rewards[0] = -1.0f; // neg reward for not placing a container
+        env->log.num_invalids += 1;
         //if (env->reset_max_breach) {
         //c_reset(env);
-        ///add_log(env);
+        add_log(env);
     //}
         return;
     }
@@ -341,7 +344,7 @@ void c_step(ContainerStacking *env) {
     //fflush(stdout);
 
     env->rewards[0] += 1.0f; //one reward for placing a container
- 
+    add_log(env);
     /* no termination; step continues */
     return;
 }
