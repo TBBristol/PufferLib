@@ -55,9 +55,9 @@ typedef struct {
 
 void add_log(ContainerStacking* env) {
     env->log.perf += (env->rewards[0] > 0) ? 1 : 0;
-    env->log.score += env->tick - env->unsorted - env->num_invalids;;
+    env->log.score += env->next_container - env->unsorted - env->num_invalids;;
     env->log.episode_length += env->tick;
-    env->log.episode_return += env->tick - env->unsorted - env->num_invalids;
+    env->log.episode_return += env->next_container - env->unsorted - env->num_invalids;
     env->log.unsorteds += (float) env->unsorted;
     env->log.num_invalids += (float) env->num_invalids;
     env->log.n++;
