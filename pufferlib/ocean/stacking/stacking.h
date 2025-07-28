@@ -47,16 +47,19 @@ typedef struct {
     int *container_leaving_priorities; // ptr to array of priorities for each container
     int *stacks; // ptr to array of stacks, each stack is an array of ints of size max_height
     float reward_us;
+    float score;
+    float num_invalids;
     float reward_max_breach;
     bool reset_max_breach;
 }ContainerStacking;
 
 void add_log(ContainerStacking* env) {
     env->log.perf += (env->rewards[0] > 0) ? 1 : 0;
-    env->log.score += env->rewards[0];
+    env->log.score += env->tick - env->unsorted - env->num_invalids;;
     env->log.episode_length += env->tick;
-    env->log.episode_return += env->rewards[0];
+    env->log.episode_return += env->tick - env->unsorted - env->num_invalids;
     env->log.unsorteds += (float) env->unsorted;
+    env->log.num_invalids += (float) env->num_invalids;
     env->log.n++;
 }
 
@@ -253,9 +256,10 @@ void c_reset(ContainerStacking *env) {
     memset(env->observations, 0.0f, sizeof(float) * env->num_stacks * 6);
 
     env->tick = 0;
-    env->unsorted = 0;
+    env->unsorted = 0.0f;
     env-> next_container = 0;
-    env->log.num_invalids = 0.0f;
+    env->num_invalids = 0.0f;
+    env->score = 0.0f;
 
 }   
     
@@ -289,10 +293,8 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env->rewards[0] = 10.0f; //changed since we now penalise for unsorted every turn
+        env->rewards[0] = 10.0f; //penalise for unsorted every turn for agent learning but a bonus for finishing
         env->rewards[0] -= env->unsorted;
-        //env->rewards[0] = env->num_containers - env->num_stacks; //so max US would turn this to zero
-       // env-> rewards[0] += -env->unsorted;  //this is output as score on term so it should be total unsorted neg
         add_log(env);
         c_reset(env);
         return;
