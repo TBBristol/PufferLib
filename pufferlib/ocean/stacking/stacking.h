@@ -23,7 +23,7 @@ typedef struct {
     float score; // Recommended unnormalized single real number perf metric
     float episode_return; // Recommended metric: sum of agent rewards over episode
     float episode_length; // Recommended metric: number of steps of agent episode
-    float num_invalids;
+    float invalids;
     float unsorteds;
     // Any extra fields you add here may be exported to Python in binding.c
     float n; // Required as the last field 
@@ -59,7 +59,7 @@ void add_log(ContainerStacking* env) {
     env->log.episode_length += env->tick;
     env->log.episode_return += (env->tick >= env->max_ep_steps) ? -500 : env->next_container - env->unsorted - env->num_invalids;  
     env->log.unsorteds += (float) env->unsorted;
-    env->log.num_invalids += (float) env->num_invalids;
+    env->log.invalids += (float) env->num_invalids;
     env->log.n++;
 }
 
@@ -279,7 +279,8 @@ void c_step(ContainerStacking *env) {
     env->terminals[0] = 0;
     env->rewards[0]   = 0.0f;
     env->tick += 1;
-
+   // printf("invalids %f\n", env->num_invalids);
+    //fflush(stdout);
     //check max steps exceeded
 
     if (env->tick >= env->max_ep_steps) {
@@ -537,7 +538,7 @@ else {
     }
     DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, font_size, WHITE);
     DrawText(TextFormat("Chosen Stack: %i", env->actions[0]), 20, 40, font_size, WHITE);
-    DrawText(TextFormat("Num invalid choices: %i", env->num_invalids), 20, 60, font_size, WHITE);
+    DrawText(TextFormat("Num invalid choices: %d",(int) env->num_invalids), 20, 60, font_size, WHITE);
    
             
         EndDrawing();
