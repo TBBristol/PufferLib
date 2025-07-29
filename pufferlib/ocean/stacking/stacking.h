@@ -54,10 +54,10 @@ typedef struct {
 }ContainerStacking;
 
 void add_log(ContainerStacking* env) {
-    env->log.perf += (env->rewards[0] > 0) ? 1 : 0;
-    env->log.score += env->next_container - env->unsorted - env->num_invalids;;
+    env->log.perf  += (env->rewards[0] > 0) ? 1 : 0;
+    env->log.score += (env->tick >= env->max_ep_steps) ? -500 : env->next_container - env->unsorted - env->num_invalids;
     env->log.episode_length += env->tick;
-    env->log.episode_return += env->next_container - env->unsorted - env->num_invalids;
+    env->log.episode_return += (env->tick >= env->max_ep_steps) ? -500 : env->next_container - env->unsorted - env->num_invalids;  
     env->log.unsorteds += (float) env->unsorted;
     env->log.num_invalids += (float) env->num_invalids;
     env->log.n++;
@@ -284,7 +284,7 @@ void c_step(ContainerStacking *env) {
 
     if (env->tick >= env->max_ep_steps) {
     env->terminals[0] = 1;
-    env->rewards[0] = env->reward_max_breach; //penalises for total poss US - 1  to avoid it cheating
+    env->rewards[0] = -1.0f; //penalises for total poss -1 to avoid it cheating
     add_log(env);
     c_reset(env);
     return;
@@ -293,8 +293,8 @@ void c_step(ContainerStacking *env) {
     // Check if last container has been placed
     if (env->next_container >= env->num_containers) {
         env->terminals[0] = 1;
-        env->rewards[0] = 10.0f; //penalise for unsorted every turn for agent learning but a bonus for finishing
-        env->rewards[0] -= env->unsorted;
+        env->rewards[0] = 1.0f; //bonus for finishing, is this learnable tho since no signal that its near to finishing...
+        //env->rewards[0] -= env->unsorted; //get rid of this since we are noramalising rewards -1 to 1 and we penalise for unsorted each step
         add_log(env);
         c_reset(env);
         return;
@@ -307,7 +307,7 @@ void c_step(ContainerStacking *env) {
 
     if (stack < 0 || stack >= env->num_stacks)  { //shouldn't ever hit this
         env->terminals[0] = 1;
-        env-> rewards[0] = -100.0f;
+        env-> rewards[0] = -1.0f;
         printf("ENV ACTION ERROR HIT");
         fflush(stdout);
         add_log(env);
@@ -318,8 +318,8 @@ void c_step(ContainerStacking *env) {
     // Check if stack is valid
     if (!free_space(env, stack)){
         //env->terminals[0] = 1;
-        env->rewards[0] = -1.0f; // neg reward for not placing a container
-        env->log.num_invalids += 1.0f;
+        env->rewards[0] = -0.2f; // neg reward for not placing a container
+        env->num_invalids += 1.0f;
         //if (env->reset_max_breach) {
         //c_reset(env);
     //}
@@ -343,11 +343,11 @@ void c_step(ContainerStacking *env) {
     generate_obs(env);
 
     // Set reward 
-    env-> rewards[0] = (float) (old_unsorted - env->unsorted); // effectively -1 for placing an US
-    //printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
-    //fflush(stdout);
+    env-> rewards[0] = (float) ((old_unsorted - env->unsorted)/10); // effectively -0.1 for placing an US
+    printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
+    fflush(stdout);
 
-    env->rewards[0] += 1.0f; //one reward for placing a container
+    //env->rewards[0] += 0.1f; // reward for placing a container
 
     /* no termination; step continues */
 }
