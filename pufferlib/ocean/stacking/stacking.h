@@ -343,9 +343,9 @@ void c_step(ContainerStacking *env) {
     generate_obs(env);
 
     // Set reward 
-    env-> rewards[0] = (float) ((old_unsorted - env->unsorted)/10); // effectively -0.1 for placing an US
-    printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
-    fflush(stdout);
+    env-> rewards[0] = ((float)(old_unsorted - env->unsorted)/5.0f); // effectively -0.2 for placing an US
+    //printf("old unsorted %d, new unsorted %d\n", old_unsorted, env->unsorted);
+    //fflush(stdout);
 
     //env->rewards[0] += 0.1f; // reward for placing a container
 
@@ -536,9 +536,9 @@ else {
         
     }
     DrawText(TextFormat("Total Unsorted: %i", env->unsorted), 20, 20, font_size, WHITE);
-    DrawText(TextFormat("Stack: %i", env->actions[0]), 20, 40, font_size, WHITE);
-
-
+    DrawText(TextFormat("Chosen Stack: %i", env->actions[0]), 20, 40, font_size, WHITE);
+    DrawText(TextFormat("Num invalid choices: %i", env->num_invalids), 20, 60, font_size, WHITE);
+   
             
         EndDrawing();
 
