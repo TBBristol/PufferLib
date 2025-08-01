@@ -69,12 +69,22 @@ class PuffeRL:
         self.total_agents = total_agents
 
         # Experience
-        if config['batch_size'] == 'auto' and config['bptt_horizon'] == 'auto':
+        if config['batch_size'] == 'auto' and config['bptt_horizon'] == 'auto': #BACK_PROP_THRU_TIME HORIZON how far rnn/lstm unrolls when backpropped
             raise pufferlib.APIUsageError('Must specify batch_size or bptt_horizon')
         elif config['batch_size'] == 'auto':
             config['batch_size'] = total_agents * config['bptt_horizon']
         elif config['bptt_horizon'] == 'auto':
             config['bptt_horizon'] = config['batch_size'] // total_agents
+"""
+Exapmle of how segments are created NOTE batch is not minibatch
+Batch (128 steps)
+ ├─ Segment 1 (32 steps)  ──> backprop horizon = 32
+ ├─ Segment 2 (32 steps)
+ ├─ Segment 3 (32 steps)
+ └─ Segment 4 (32 steps)
+
+ Comes to one segement per (env,agent) length BPPT_HORIZON
+ """
 
         batch_size = config['batch_size']
         horizon = config['bptt_horizon']
@@ -86,7 +96,9 @@ class PuffeRL:
             )
 
         device = config['device']
-        self.observations = torch.zeros(segments, horizon, *obs_space.shape,
+
+        #Create tensors for buffers logs etc
+        self.observations = torch.zeros(segments, horizon, *obs_space.shape, #So this expands into a tensor of shape (segments, horizon, obs_dims) -> (segments, horizon, 3,64,64) for example
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
@@ -207,6 +219,13 @@ class PuffeRL:
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
     def evaluate(self):
+
+"""
+This process works on reading current state and taking all the stats etc, then calculating actions thru policy. Writes 
+all to buffer and then at the END sends action to vectorized environment ready for the start of the next call.
+"""
+
+
         profile = self.profile
         epoch = self.epoch
         profile('eval', epoch)
@@ -223,13 +242,20 @@ class PuffeRL:
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile('env', epoch)
-            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            o, r, d, t, info, env_id, mask = self.vecenv.recv() #Get the current state
 
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
 
+            """
+            Turns env_id into a slice object which has 3 properties:
+            slice_obj.start   # first index   (inclusive)
+            slice_obj.stop    # last index + 1 (exclusive)
+            slice_obj.step    # stride (often None/1)
+            """
+
             done_mask = d + t # TODO: Handle truncations separately
-            self.global_step += int(mask.sum())
+            self.global_step += int(mask.sum()) #NB mask is valid step mask not action mask
 
             profile('eval_copy', epoch)
             o = torch.as_tensor(o)
@@ -245,14 +271,19 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
+#The trainer owns two big tensors (self.lstm_h, self.lstm_c) indexed the same way as the rollout buffer; every time it calls the policy it hands over the slice for the current agent stream, the policy overwrites that slice with the updated hidden state, and the trainer resets those rows either when an episode ends or after exactly bptt_horizon steps—implementing classic truncated Back-Propagation-Through-Time.
 
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
-                logits, value = self.policy.forward_eval(o_device, state)
-                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                r = torch.clamp(r, -1, 1)
+           ###### MAIN POLICY ACTION CHOICE BASED ON RECIEVED OBS ##### 
+
+                logits, value = self.policy.forward_eval(o_device, state) #Curent state thru the policy
+                action, logprob, _ = pufferlib.pytorch.sample_logits(logits) #Convert logits to action and logprob
+                r = torch.clamp(r, -1, 1) #CLAMPING THE REWARDS TO BE BETWEEN -1 AND 1
+           ######
+
 
             profile('eval_copy', epoch)
             with torch.no_grad():
@@ -299,7 +330,7 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile('env', epoch)
-            self.vecenv.send(action)
+            self.vecenv.send(action)   #Sends actions to the vectorized environment
 
         profile('eval_misc', epoch)
         self.free_idx = self.total_agents
@@ -862,26 +893,47 @@ class WandbLogger:
         data_dir = artifact.download()
         model_file = max(os.listdir(data_dir))
         return f'{data_dir}/{model_file}'
- 
+
+
+"""
+MAIN TRAINING FUNCTION
+Orchestrates the training loop and logging
+"""
 def train(env_name, args=None, vecenv=None, policy=None, logger=None):
+
+#Usually args is None when using puffer train
+"""
+Ths load config adds a load of default args and uses default.ini which loads policy name as well
+This includes [train] args which are used for training and [vec] which is used for vectorization
+"""
     args = args or load_config(env_name)
     
    
-
+###############################################################################   Code for distributed training
     # Assume TorchRun DDP is used if LOCAL_RANK is set
-    if 'LOCAL_RANK' in os.environ:
-        world_size = int(os.environ.get('WORLD_SIZE', 1))
+    if 'LOCAL_RANK' in os.environ:    #checks if LOCAL_RANK is set and assumes that DDP is used
+        world_size = int(os.environ.get('WORLD_SIZE', 1)) #total number of processes
         print("World size", world_size)
-        master_addr = os.environ.get('MASTER_ADDR', 'localhost')
-        master_port = os.environ.get('MASTER_PORT', '29500')
-        local_rank = int(os.environ["LOCAL_RANK"])
+        master_addr = os.environ.get('MASTER_ADDR', 'localhost') #address of the master node
+        master_port = os.environ.get('MASTER_PORT', '29500') #port of the master node
+        local_rank = int(os.environ["LOCAL_RANK"]) 
         print(f"rank: {local_rank}, MASTER_ADDR={master_addr}, MASTER_PORT={master_port}")
         torch.cuda.set_device(local_rank)
         os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+##############################################################################
+    """
+    Uses a laod of stuff from the config load and then returns a vecenv from vectory.py code
+    """
+    vecenv = vecenv or load_env(env_name, args)  #when using standard puffer train these are None in the args so loads neede
 
-    vecenv = vecenv or load_env(env_name, args)
-    policy = policy or load_policy(args, vecenv)
+    """
+    Loads the policy from the config load and then returns a policy from the pufferlib.ocean.torch.policy.py code, also loads from load-id arg which can pull from Wandb/neptune. Default and other policies in models.py 
+    """
+    policy = policy or load_policy(args, vecenv) 
 
+
+############################################################################################################################
+#Again more stuff for distributed training
     if 'LOCAL_RANK' in os.environ:
         args['train']['device'] = torch.cuda.current_device()
         torch.distributed.init_process_group(backend='nccl', world_size=world_size)
@@ -895,23 +947,31 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
         model.forward_eval = policy.forward_eval
         policy = model.to(local_rank)
-
-    if args['neptune']:
+############################################################################################################################
+    if args['neptune']: #Sets up logger/ neptune or WANDB
         logger = NeptuneLogger(args)
     elif args['wandb']:
         logger = WandbLogger(args)
 
-    train_config = dict(**args['train'], env=env_name)
-    pufferl = PuffeRL(train_config, vecenv, policy, logger)
+    train_config = dict(**args['train'], env=env_name) #Takes train config probably loaded from default.ini or congig file 
+
+    #Creates PuffeRL object which is used for training this will store all the buffers and other things
+    pufferl = PuffeRL(train_config, vecenv, policy, logger) 
 
     all_logs = []
-    while pufferl.global_step < train_config['total_timesteps']:
-        pufferl.evaluate()
+
+###################################        MAIN LOOP     ##################################################################    
+    while pufferl.global_step < train_config['total_timesteps']: #PuffeRL object has a global step which is used for training
+
+        #These two little lines are the MEAT of the training. 
+        pufferl.evaluate() 
         logs = pufferl.train()
 
         if logs is not None:
             if pufferl.global_step > 0.20*train_config['total_timesteps']:
                 all_logs.append(logs)
+############################################################################################################################i
+
 
     # Final eval. You can reset the env here, but depending on
     # your env, this can skew data (i.e. you only collect the shortest
@@ -928,7 +988,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
     pufferl.print_dashboard()
     model_path = pufferl.close()
-    pufferl.logger.close(model_path)
+    pufferl.logger.close(model_path)   #Important to close logger
     return all_logs
 
 def eval(env_name, args=None, vecenv=None, policy=None):
