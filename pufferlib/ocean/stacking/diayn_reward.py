@@ -10,7 +10,7 @@ class DIAYNVecEnv(PufferEnv):
     A drop-in VecEnv wrapper that replaces the
     rewards produced by the underlying C backend.
     """
-    def __init__(self, base_env, skill_sampler=None, num_skills=4, disc_train_interval=50, device="cpu"):
+    def __init__(self, base_env, skill_sampler=None, num_skills=4, disc_train_interval=5, disc_batch_size=1024, device="cpu"):
         
         self.env = base_env
         self.discriminator= Discriminator(state_dim = 6 * self.env.num_stacks, num_skills=num_skills).to(device)
@@ -18,12 +18,19 @@ class DIAYNVecEnv(PufferEnv):
             self.discriminator.parameters(), lr=1e-3
         )
         self.device = device
-        self.single_obs_space = self.env.single_observation_space
-        self.replay_buffer = DIAYNReplayBuffer(200000, self.single_obs_space.shape, num_skills, device)
+
+        old_low  = self.env.single_observation_space.low
+        old_high = self.env.single_observation_space.high
+        low  = np.concatenate([old_low,  np.zeros(self.num_skills)], axis=-1)
+        high = np.concatenate([old_high, np.ones (self.num_skills)], axis=-1)
+        from gym.spaces import Box
+        self.single_obs_space = Box(low=low, high=high, dtype=np.float32)
+
+        self.replay_buffer = DIAYNReplayBuffer(50000, self.single_obs_space.shape, num_skills, device)
         self.num_skills = num_skills
         self.step_count = 0
         self.disc_train_interval = disc_train_interval
-        self.disc_batch_size = disc_train_interval // 10
+        self.disc_batch_size = disc_batch_size
 
         if skill_sampler is None:
             self.skill_sampler = lambda n: np.random.randint(
@@ -38,12 +45,12 @@ class DIAYNVecEnv(PufferEnv):
     def _diayn_reward(self, obs_batch):
         self.discriminator.eval()
         with torch.no_grad():
-            logits = self.discriminator(torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device))  # (n_envs, K)
-            log_probs = torch.log_softmax(logits, dim=1)          # log q(z|s)
+            logits = self.discriminator(torch.as_tensor(obs_batch, dtype=torch.float32, device=self.device))  # (batch, nskills)
+            log_probs = torch.log_softmax(logits, dim=1)          # log q(z|s)  (batch, nskills)
             idx = torch.arange(len(obs_batch), device=self.device) #This and next line fancy indexing to select log probs of actaul skill used
-            log_q = log_probs[idx, torch.as_tensor(self.current_skills, device=self.device)]
-            log_p = -math.log(self.num_skills)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K)
-            intrinsic = log_q - log_p # logp is -0.6ish for (4)                 
+            log_q = log_probs[idx, torch.as_tensor(self.current_skills, device=self.device)].clamp(min=-20) #(batch)
+            log_p = -math.log(self.num_skills)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)  
+            intrinsic = log_q - log_p # logp is -1.38 ish for (4) so as p approaches 1 log p approaches 0 so reward goes +ve               
 
             return intrinsic.cpu().numpy()                        
 
@@ -57,32 +64,31 @@ class DIAYNVecEnv(PufferEnv):
 
     def step(self, actions):
         obs, rew, term, trunc, info = self.env.step(actions) #obs is batch/ containers/6
-        self.replay_buffer.add(obs, self.current_skills.copy())
+        self.replay_buffer.add(obs, self.current_skills.copy()) #Add then separate sinc we dont want disc seeing skills in the obs
         diayn_reward = self._diayn_reward(obs)
 
         if not info:
             info.append({})
 
         log_dict = info[0]
-        if 'diayn_reward' not in log_dict:
-            log_dict['diayn_reward'] = 0.0
-        log_dict['diayn_reward'] += diayn_reward.mean()
-
+  
+        log_dict['diayn_reward'] = float(diayn_reward.mean())
 
         done_mask = np.logical_or(term, trunc)
         if done_mask.any():
             self.current_skills[done_mask] = self.skill_sampler(done_mask.sum())
-
       
-        if self.step_count % self.disc_train_interval == 0 and self.replay_buffer.full:
-           print(f"step {self.step_count}")
-           print(f"envtick {self.env.tick}")
+        if self.step_count % self.disc_train_interval == 0 and len(self.replay_buffer) >= self.disc_batch_size:
            loss = self.train_discriminator()
-           if 'discriminator_loss' not in log_dict:
-               log_dict['discriminator_loss'] = 0.0
-           log_dict['discriminator_loss'] += loss
-
+           log_dict['discriminator_loss'] = float(loss)
+         
         self.step_count += 1
+        import pdb; pdb.set_trace()
+        breakpoint()
+        skillsoh = np.zeros((self.current_skills.shape[0],self.num_skills))
+        skillsoh[np.arange(len(self.current_skills)), self.current_skills] = 1
+        flat_obs = obs.reshape(obs.shape[0], -1)
+        obs = np.concatenate([flat_obs, skillsoh], axis=1) #return obs with skills concatenated for policy
         return obs, diayn_reward, term, trunc, info
 
     def train_discriminator(self):
