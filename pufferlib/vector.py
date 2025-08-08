@@ -145,7 +145,10 @@ class Serial:
                 o, i = env.reset()
             else:
                 o, r, d, t, i = env.step(atns)
-
+              
+                #print(f'Vector R: {r}')
+                #print(f'Vector Obsshape: {o.shape}')
+                #print(f'Vector Obs_skill: {o[0,-4:]}')
             if i:
                 if isinstance(i, list):
                     self.infos.extend(i)
@@ -161,8 +164,8 @@ class Serial:
             env.notify()
 
     def recv(self):
-        recv_precheck(self)
-        return (self.observations, self.rewards, self.terminals, self.truncations,
+       recv_precheck(self)
+       return (self.observations, self.rewards, self.terminals, self.truncations,
             self.infos, self.agent_ids, self.masks)
 
     def close(self):

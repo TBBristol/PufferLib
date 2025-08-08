@@ -4,6 +4,9 @@ import math
 from torch import nn
 import torch.nn.functional as F
 from pufferlib import PufferEnv
+from gymnasium.spaces.utils import flatdim
+from gym.spaces import Box
+
 
 class DIAYNVecEnv(PufferEnv):
     """
@@ -13,24 +16,30 @@ class DIAYNVecEnv(PufferEnv):
     def __init__(self, base_env, skill_sampler=None, num_skills=4, disc_train_interval=5, disc_batch_size=1024, device="cpu"):
         
         self.env = base_env
-        self.discriminator= Discriminator(state_dim = 6 * self.env.num_stacks, num_skills=num_skills).to(device)
-        self.disc_opt = torch.optim.Adam(
-            self.discriminator.parameters(), lr=1e-3
-        )
+        self.num_skills = num_skills
         self.device = device
 
-        old_low  = self.env.single_observation_space.low
-        old_high = self.env.single_observation_space.high
-        low  = np.concatenate([old_low,  np.zeros(self.num_skills)], axis=-1)
-        high = np.concatenate([old_high, np.ones (self.num_skills)], axis=-1)
-        from gym.spaces import Box
-        self.single_obs_space = Box(low=low, high=high, dtype=np.float32)
+        raw_obs_space = self.env.single_observation_space
 
-        self.replay_buffer = DIAYNReplayBuffer(50000, self.single_obs_space.shape, num_skills, device)
-        self.num_skills = num_skills
-        self.step_count = 0
+
+        self.discriminator= Discriminator(state_dim = flatdim(raw_obs_space), num_skills=num_skills).to(self.device)
+        self.disc_opt = torch.optim.Adam(self.discriminator.parameters(), lr=1e-3)
+        self.replay_buffer = DIAYNReplayBuffer(50000, flatdim(raw_obs_space), num_skills, device)
         self.disc_train_interval = disc_train_interval
         self.disc_batch_size = disc_batch_size
+
+        #Re-shape the obs space to send skill to Policy
+        old_low  = self.env.single_observation_space.low
+        old_high = self.env.single_observation_space.high
+        
+        old_low_flat  = old_low .astype(np.float32).flatten()   
+        old_high_flat = old_high.astype(np.float32).flatten()
+
+        low  = np.concatenate([old_low_flat,  np.zeros(self.num_skills, dtype=np.float32)])
+        high = np.concatenate([old_high_flat, np.ones (self.num_skills, dtype=np.float32)])  
+        self.single_observation_and_skill_space = Box(low=low, high=high, dtype=np.float32)
+
+        self.step_count = 0
 
         if skill_sampler is None:
             self.skill_sampler = lambda n: np.random.randint(
@@ -39,8 +48,20 @@ class DIAYNVecEnv(PufferEnv):
         else:
             self.skill_sampler = skill_sampler
 
+    @property
+    def single_observation_space(self):
+        return self.single_observation_and_skill_space
+
     def __getattr__(self, name):
         return getattr(self.env, name)
+    
+    def _skill_obs(self, obs):
+        """
+        Flattens the observations and concatenates the one-hot skill vector
+        """
+        flat = obs.reshape(obs.shape[0], -1)
+        one_hot = np.eye(self.num_skills, dtype=np.float32)[self.current_skills]
+        return np.concatenate([flat, one_hot], axis=1)
 
     def _diayn_reward(self, obs_batch):
         self.discriminator.eval()
@@ -57,15 +78,24 @@ class DIAYNVecEnv(PufferEnv):
     def reset(self, *a, **kw):
         self.step_count = 0
         self.current_skills = self.skill_sampler(self.env.num_envs)
-        return self.env.reset(*a, **kw)
+        skill_obs_flat , [] = self.env.reset(*a, **kw)
+        raw_flat = skill_obs_flat[:,: -self.num_skills]
+        new_obs = self._skill_obs(raw_flat)
+        self.env.observations[...] = new_obs
+        return new_obs, []
+      
 
     def close(self):
         self.env.close()
 
     def step(self, actions):
-        obs, rew, term, trunc, info = self.env.step(actions) #obs is batch/ containers/6
-        self.replay_buffer.add(obs, self.current_skills.copy()) #Add then separate sinc we dont want disc seeing skills in the obs
-        diayn_reward = self._diayn_reward(obs)
+
+        #obs comes back from C flat with no skill attached but zeros in place as size was changed in init ready made for skill
+        skill_obs_flat, rew, term, trunc, info = self.env.step(actions)
+        raw_flat = skill_obs_flat[:,: -self.num_skills] #so we can use this for discriminator remove skill zeros
+
+        self.replay_buffer.add(raw_flat, self.current_skills.copy())        
+        diayn_reward = self._diayn_reward(raw_flat)
 
         if not info:
             info.append({})
@@ -82,13 +112,15 @@ class DIAYNVecEnv(PufferEnv):
            loss = self.train_discriminator()
            log_dict['discriminator_loss'] = float(loss)
          
+
+        obs = self._skill_obs(raw_flat) #add current skill to raw_obs and flatten
+     
+        self.env.observations[...] = obs #write to obs and reward buffers       
+        self.env.rewards[...] = diayn_reward
+
+
         self.step_count += 1
-        import pdb; pdb.set_trace()
-        breakpoint()
-        skillsoh = np.zeros((self.current_skills.shape[0],self.num_skills))
-        skillsoh[np.arange(len(self.current_skills)), self.current_skills] = 1
-        flat_obs = obs.reshape(obs.shape[0], -1)
-        obs = np.concatenate([flat_obs, skillsoh], axis=1) #return obs with skills concatenated for policy
+
         return obs, diayn_reward, term, trunc, info
 
     def train_discriminator(self):
@@ -109,7 +141,7 @@ class DIAYNReplayBuffer:
         self.obs_shape = obs_shape
         self.device = device
         self.next_idx = 0
-        self.obs = torch.zeros(buffer_size, *obs_shape, device=device)
+        self.obs = torch.zeros(buffer_size, obs_shape, device=device)
         self.skills = torch.zeros(buffer_size, dtype=torch.long, device=device)
         self.full = False
         self.num_skills = num_skills
