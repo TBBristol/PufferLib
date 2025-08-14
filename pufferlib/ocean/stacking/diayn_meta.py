@@ -53,7 +53,7 @@ class DIAYNMetaEnv(PufferEnv):
     A drop-in VecEnv wrapper that replaces the
     rewards produced by the underlying C backend.
     """
-    def __init__(self, base_env, diayn_model= '/Users/ha24583/Documents/GitHub/PufferLib/experiments/puffer_stacking_sunbwh25.pt', k =2, skill_sampler=None, num_skills=4, disc_train_interval=5, disc_batch_size=1024, device="cpu"):
+    def __init__(self, base_env, diayn_model= '/home/t1nn/Documents/Github/PufferLib/experiments/puffer_stacking_sunbwh25.pt', k =2, skill_sampler=None, num_skills=4, disc_train_interval=5, disc_batch_size=1024, device="cpu"):
         assert diayn_model is not None, "Diayn model must be provided"
         self.diayn_model_dict = torch.load(diayn_model, map_location=device)
         diayn_model_obs_shape = self.diayn_model_dict['policy.encoder.0.weight'].shape[1]
