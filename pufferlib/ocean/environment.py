@@ -156,6 +156,7 @@ MAKE_FUNCTIONS = {
     'checkers': 'Checkers',
     'asteroids': 'Asteroids',
     'whisker_racer': 'WhiskerRacer',
+    'stacking': 'ContainerStacking',
     'spaces': make_spaces,
     'multiagent': make_multiagent,
 }
