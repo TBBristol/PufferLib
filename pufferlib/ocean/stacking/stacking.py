@@ -46,11 +46,13 @@ class ContainerStacking(pufferlib.PufferEnv):
 )
      
         self.single_action_space = gymnasium.spaces.Discrete(num_stacks)
-
+        self.num_envs = num_envs
         self.render_mode = render_mode
         self.log_interval = log_interval
         self.num_agents = num_envs
-      
+        self.num_containers = num_containers
+        self.max_height = max_height
+        self.num_stacks = num_stacks
         super().__init__(buf)
         self.c_envs = binding.vec_init(self.observations, 
                                        self.actions, 
@@ -82,8 +84,7 @@ class ContainerStacking(pufferlib.PufferEnv):
         info = []
         if self.tick % self.log_interval == 0:
             info.append(binding.vec_log(self.c_envs))
-        print(self.rewards) 
-        print(len(self.rewards))
+     
         return (self.observations, self.rewards,
             self.terminals, self.truncations, info)
 
