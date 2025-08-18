@@ -17,7 +17,6 @@ import importlib
 import configparser
 from threading import Thread
 from collections import defaultdict, deque
-
 import numpy as np
 import psutil
 
@@ -106,7 +105,7 @@ class PuffeRL:
 
 #DIAYN SETUP
         self.num_skills = config['num_skills']
-        self.ohe_skills_tensor = torch.eye(self.num_skills)
+        self.ohe_skills_tensor = torch.eye(self.num_skills, device= device)
         self.skills = torch.randint(0, self.num_skills, (segments,), device=device)
 
         # LSTM
@@ -230,9 +229,11 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            breakpoint()
             profile('eval_misc', epoch)
-            env_id = slice(env_id[0], env_id[-1] + 1)
+            env_id = slice(env_id[0], env_id[-1] + 1) #comes back as an array 0 to 4091 (4092,)
+
+#env_id.start and env_id.stop reference the env Ids being used note stop is +1 at end?
+
 
             done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
@@ -242,14 +243,18 @@ class PuffeRL:
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, no:n_blocking=True)
-
             profile('eval_forward', epoch)
+            
+            skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
+
+
             with torch.no_grad(), self.amp_context:
                 state = dict(
                     reward=r,
                     done=d,
                     env_id=env_id,
                     mask=mask,
+                    skill=skill, ######################## diayn stuff
                 )
 
                 if config['use_rnn']:
@@ -258,7 +263,29 @@ class PuffeRL:
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
+
+                #diaynstuff ###########
+                diayn_logits = self.policy.policy.discriminator(o_device)
+                diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+
+
+                row = torch.arange(env_id.stop - env_id.start, device=diayn_logprob.device)
+
+
+                
+                diayn_logq = diayn_logprob[row, self.skills[env_id]].to(diayn_logprob.device)
+
+                k = torch.tensor(self.num_skills, device = device)
+
+                diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
+                diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+
+                r = diayn_intrinsic
+
                 r = torch.clamp(r, -1, 1)
+                self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
+
 
             profile('eval_copy', epoch)
             with torch.no_grad():
@@ -356,17 +383,30 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-
+            mb_skills_seg = self.skills[idx]
             profile('train_forward', epoch)
+
+
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+
+            ####DIAYN shapes    
+            
+            horizon = config['bptt_horizon']
+            mb_skills = mb_skills_seg.repeat_interleave(horizon)
+            mb_skills_ohe = self.ohe_skills_tensor[mb_skills]
+            
+
+
+
 
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
+                skill=mb_skills_ohe,
             )
-
+            
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
@@ -387,6 +427,18 @@ class PuffeRL:
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+            
+
+            #diaynstuff ###########
+
+            obs_for_disc = mb_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape)
+            diayn_logits = self.policy.policy.discriminator(obs_for_disc)
+            diayn_loss = torch.nn.functional.cross_entropy(diayn_logits, mb_skills.long())
+            diayn_loss.backward()
+            
+
+
+
 
             # Losses
             pg_loss1 = -adv * ratio
@@ -409,6 +461,7 @@ class PuffeRL:
 
             # Logging
             profile('train_misc', epoch)
+            losses['diayn_loss'] += diayn_loss.item() / self.total_minibatches
             losses['policy_loss'] += pg_loss.item() / self.total_minibatches
             losses['value_loss'] += v_loss.item() / self.total_minibatches
             losses['entropy'] += entropy_loss.item() / self.total_minibatches

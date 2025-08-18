@@ -21,9 +21,15 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128):
+    def __init__(self, env, hidden_size=128, diayn_skills = 4):
         super().__init__()
         self.hidden_size = hidden_size
+
+
+
+        self.diayn_skills = diayn_skills
+
+
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
@@ -36,13 +42,23 @@ class Default(nn.Module):
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
             input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
-            self.encoder = nn.Linear(input_size, self.hidden_size)
+
+
+
+            self.encoder = nn.Linear(input_size + diayn_skills, self.hidden_size) ########
+        
+
         else:
             num_obs = np.prod(env.single_observation_space.shape)
-            self.encoder = torch.nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
+            
+
+            self.encoder = torch.nn.Sequential( #############
+                pufferlib.pytorch.layer_init(nn.Linear(num_obs +diayn_skills, hidden_size)),
                 nn.GELU(),
             )
+
+
+
             
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)
@@ -62,8 +78,20 @@ class Default(nn.Module):
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
 
+
+
+        self.discriminator = nn.Sequential( #############
+            nn.Flatten(start_dim=1, end_dim=-1),
+            nn.Linear(num_obs, hidden_size), #TODO num_obs is only in the box instance? make geneirc? 
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, self.diayn_skills),
+        )
+
+
+
     def forward_eval(self, observations, state=None):
-        breakpoint()
         hidden = self.encode_observations(observations, state=state)
         logits, values = self.decode_actions(hidden)
         return logits, values
@@ -80,6 +108,8 @@ class Default(nn.Module):
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
         else: 
             observations = observations.view(batch_size, -1)
+
+        observations = torch.cat((observations, state['skill']), dim = -1)
         return self.encoder(observations.float())
 
     def decode_actions(self, hidden):
