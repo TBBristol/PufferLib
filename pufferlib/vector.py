@@ -263,7 +263,7 @@ class Multiprocessing:
         self.envs_per_worker = envs_per_worker
         self.workers_per_batch = batch_size // envs_per_worker
         self.num_workers = num_workers
-
+        breakpoint()
         # I really didn't want to need a driver process... with mp.shared_memory
         # we can fetch this data from the worker processes and ever perform
         # additional space checks. Unfortunately, SharedMemory has a janky integration

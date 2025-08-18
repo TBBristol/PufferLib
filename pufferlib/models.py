@@ -63,6 +63,7 @@ class Default(nn.Module):
             nn.Linear(hidden_size, 1), std=1)
 
     def forward_eval(self, observations, state=None):
+        breakpoint()
         hidden = self.encode_observations(observations, state=state)
         logits, values = self.decode_actions(hidden)
         return logits, values
