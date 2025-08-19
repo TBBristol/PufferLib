@@ -29,6 +29,9 @@ import pufferlib
 import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
+import pufferlib.spaces
+
+
 try:
     from pufferlib import _C
 except ImportError:
@@ -105,8 +108,12 @@ class PuffeRL:
 
 #DIAYN SETUP
         self.num_skills = config['num_skills']
+        self.k = config['k']
         self.ohe_skills_tensor = torch.eye(self.num_skills, device= device)
         self.skills = torch.randint(0, self.num_skills, (segments,), device=device)
+        self.diayn_training = True
+        self.diayn_policy = None
+        
 
         # LSTM
         if config['use_rnn']:
@@ -199,6 +206,14 @@ class PuffeRL:
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
+    
+
+    def model_and_env_reset_for_diayn_hrl(self, config, vecenv, policy, logger=None):
+        self.__init__(config, vecenv, policy, logger)
+        self.diayn_training = False
+
+        
+
 
     @property
     def uptime(self):
@@ -245,7 +260,11 @@ class PuffeRL:
             d = torch.as_tensor(d).to(device)#, no:n_blocking=True)
             profile('eval_forward', epoch)
             
-            skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
+
+            if self.diayn_training:
+                skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
+            else: 
+                skill = None
 
 
             with torch.no_grad(), self.amp_context:
@@ -261,30 +280,49 @@ class PuffeRL:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
-                logits, value = self.policy.forward_eval(o_device, state)
-                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                if not self.diayn_training:  
 
 
-                #diaynstuff ###########
-                diayn_logits = self.policy.policy.discriminator(o_device)
-                diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+                    skill_logits, value = self.policy.forward_eval(o_device, state)
+                    skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(skill_logits)
+
+                    state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
 
-                row = torch.arange(env_id.stop - env_id.start, device=diayn_logprob.device)
+                    logits, value = self.diayn_policy.forward_eval(o_device, state)
+                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
+                if self.diayn_training:
+
+                    logits, value = self.policy.forward_eval(o_device, state)
+                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
 
-                
-                diayn_logq = diayn_logprob[row, self.skills[env_id]].to(diayn_logprob.device)
+                    #diaynstuff ###########
+                    diayn_logits = self.policy.policy.discriminator(o_device)
+                    diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
 
-                k = torch.tensor(self.num_skills, device = device)
 
-                diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
-                diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+                    row = torch.arange(env_id.stop - env_id.start, device=diayn_logprob.device)
 
-                r = diayn_intrinsic
+
+                    
+                    diayn_logq = diayn_logprob[row, self.skills[env_id]].to(diayn_logprob.device)
+
+                    k = torch.tensor(self.num_skills, device = device)
+
+                    diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
+                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+
+                    r = diayn_intrinsic
+                    self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
+
+
+
 
                 r = torch.clamp(r, -1, 1)
-                self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
+                
+
 
 
             profile('eval_copy', epoch)
@@ -389,16 +427,13 @@ class PuffeRL:
 
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-
-            ####DIAYN shapes    
             
-            horizon = config['bptt_horizon']
-            mb_skills = mb_skills_seg.repeat_interleave(horizon)
-            mb_skills_ohe = self.ohe_skills_tensor[mb_skills]
-            
-
-
-
+            if self.diayn_training:
+                horizon = config['bptt_horizon']
+                mb_skills = mb_skills_seg.repeat_interleave(horizon)
+                mb_skills_ohe = self.ohe_skills_tensor[mb_skills]
+            else:
+                mb_skills_ohe = None
 
             state = dict(
                 action=mb_actions,
@@ -407,9 +442,33 @@ class PuffeRL:
                 skill=mb_skills_ohe,
             )
             
-            logits, newvalue = self.policy(mb_obs, state)
-            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
+
+
+            if not self.diayn_training:
+
+               
+                skill_logits, newvalue = self.policy(mb_obs, state)
+                skill_choices, newlogprob, _= pufferlib.pytorch.sample_logits(skill_logits)
+                
+                mb_skills_ohe = self.ohe_skills_tensor[skill_choices] ####
+                state['mb_skills_ohe'] = mb_skills_ohe
+                
+                with torch.no_grad():
+                    logits, newvalue = self.diayn_policy(mb_obs, state)
+                    actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+
+
+
+            else:
+
+                logits, newvalue = self.policy(mb_obs, state)
+                actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+
+
+
+
+            
             profile('train_misc', epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
@@ -428,18 +487,13 @@ class PuffeRL:
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
             
-
-            #diaynstuff ###########
-
-            obs_for_disc = mb_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape)
-            diayn_logits = self.policy.policy.discriminator(obs_for_disc)
-            diayn_loss = torch.nn.functional.cross_entropy(diayn_logits, mb_skills.long())
-            diayn_loss.backward()
-            
-
-
-
-
+            if self.diayn_training:
+                #diaynstuff ###########
+                obs_for_disc = mb_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape)
+                diayn_logits = self.policy.policy.discriminator(obs_for_disc)
+                diayn_loss = torch.nn.functional.cross_entropy(diayn_logits, mb_skills.long())
+                diayn_loss.backward()
+                  
             # Losses
             pg_loss1 = -adv * ratio
             pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
@@ -461,7 +515,8 @@ class PuffeRL:
 
             # Logging
             profile('train_misc', epoch)
-            losses['diayn_loss'] += diayn_loss.item() / self.total_minibatches
+            if self.diayn_training:
+                losses['diayn_loss'] += diayn_loss.item() / self.total_minibatches
             losses['policy_loss'] += pg_loss.item() / self.total_minibatches
             losses['value_loss'] += v_loss.item() / self.total_minibatches
             losses['entropy'] += entropy_loss.item() / self.total_minibatches
@@ -492,6 +547,29 @@ class PuffeRL:
         profile.end()
         logs = None
         self.epoch += 1
+
+
+
+
+
+
+############################
+        #diayn switch to train using skills
+        if self.global_step >= config['total_timesteps']/2:
+            if not self.diayn_policy:
+                breakpoint()
+                action_policy = self.policy
+                config = self.config
+                env_name = config['env']
+                vecenv = self.vecenv
+                args = load_config(env_name)
+                policy = load_policy(args, vecenv)
+                self.model_and_env_reset_for_diayn_hrl(config, vecenv, policy) 
+                self.diayn_policy = action_policy
+         
+
+########################
+
         done_training = self.global_step >= config['total_timesteps']
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
@@ -1131,7 +1209,6 @@ def load_policy(args, vecenv):
     package = args['package']
     module_name = 'pufferlib.ocean' if package == 'ocean' else f'pufferlib.environments.{package}'
     env_module = importlib.import_module(module_name)
-
     device = args['train']['device']
     policy_cls = getattr(env_module.torch, args['policy_name'])
     policy = policy_cls(vecenv.driver_env, **args['policy'])

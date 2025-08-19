@@ -41,23 +41,21 @@ class Default(nn.Module):
 
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
-            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
-
-
-
-            self.encoder = nn.Linear(input_size + diayn_skills, self.hidden_size) ########
-        
+            num_obs = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
 
         else:
             num_obs = np.prod(env.single_observation_space.shape)
             
 
-            self.encoder = torch.nn.Sequential( #############
+        self.encoder = torch.nn.Sequential(
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs +diayn_skills, hidden_size)),
                 nn.GELU(),
             )
 
-
+        self.skill_selector_encoder = self.selector_encoder = nn.Sequential(
+                                                nn.Linear(num_obs, self.hidden_size),
+                                                nn.GELU(),
+                                                )
 
             
         if self.is_multidiscrete:
@@ -71,9 +69,15 @@ class Default(nn.Module):
                 nn.Linear(hidden_size, num_atns), std=0.01)
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
-                nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
+                    nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
             self.decoder_logstd = nn.Parameter(torch.zeros(
                 1, env.single_action_space.shape[0]))
+
+
+        self.decoder_skill_selector = pufferlib.pytorch.layer_init(
+                    nn.Linear(hidden_size, self.diayn_skills), std=0.01)
+
+
 
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
@@ -82,7 +86,7 @@ class Default(nn.Module):
 
         self.discriminator = nn.Sequential( #############
             nn.Flatten(start_dim=1, end_dim=-1),
-            nn.Linear(num_obs, hidden_size), #TODO num_obs is only in the box instance? make geneirc? 
+            nn.Linear(num_obs, hidden_size),            
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -93,7 +97,7 @@ class Default(nn.Module):
 
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)
-        logits, values = self.decode_actions(hidden)
+        logits, values = self.decode_actions(hidden, state=state)
         return logits, values
 
     def forward(self, observations, state=None):
@@ -108,25 +112,31 @@ class Default(nn.Module):
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
         else: 
             observations = observations.view(batch_size, -1)
+        if not state or state['skill'] is not None:
+            observations = torch.cat((observations, state['skill']), dim = -1)
+            return self.encoder(observations.float())
+        return self.skill_selector_encoder(observations.float())
 
-        observations = torch.cat((observations, state['skill']), dim = -1)
-        return self.encoder(observations.float())
-
-    def decode_actions(self, hidden):
+    def decode_actions(self, hidden, state=None):
         '''Decodes a batch of hidden states into (multi)discrete actions.
         Assumes no time dimension (handled by LSTM wrappers).'''
-        if self.is_multidiscrete:
-            logits = self.decoder(hidden).split(self.action_nvec, dim=1)
-        elif self.is_continuous:
-            mean = self.decoder_mean(hidden)
-            logstd = self.decoder_logstd.expand_as(mean)
-            std = torch.exp(logstd)
-            logits = torch.distributions.Normal(mean, std)
-        else:
-            logits = self.decoder(hidden)
+        if not state or state['skill'] is not None:
+            if self.is_multidiscrete:
+                logits = self.decoder(hidden).split(self.action_nvec, dim=1)
+            elif self.is_continuous:
+                mean = self.decoder_mean(hidden)
+                logstd = self.decoder_logstd.expand_as(mean)
+                std = torch.exp(logstd)
+                logits = torch.distributions.Normal(mean, std)
+            else:
+                logits = self.decoder(hidden)
 
+            values = self.value(hidden)
+            return logits, values
+
+        skill_logits = self.decoder_skill_selector(hidden)
         values = self.value(hidden)
-        return logits, values
+        return skill_logits, values
 
 class LSTMWrapper(nn.Module):
     def __init__(self, env, policy, input_size=128, hidden_size=128):
