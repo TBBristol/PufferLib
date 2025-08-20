@@ -357,6 +357,13 @@ class PuffeRL:
             else: 
                 skill = None
 
+#Need to use state to tell polices what path to use for input output in/out skill in implies obs+skill concat. 
+#skill/skill
+#skill/ action
+#obs/skill
+#obs/action
+
+
 
             with torch.no_grad(), self.amp_context:
                 state = dict(
@@ -364,6 +371,7 @@ class PuffeRL:
                     done=d,
                     env_id=env_id,
                     mask=mask,
+                    path = None, #for polices to ensure takes right encoder/decoder
                     skill=skill, ######################## diayn stuff
                 )
 
@@ -380,17 +388,22 @@ class PuffeRL:
                         )
 
                     #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
+
+#obs/skill
+                    state['path'] = 'obs/skill'
                     logits, value = self.policy.forward_eval(o_device, state)
                     skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-
+                    
                     diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
-
+#skill/action
+                    diayn_state['path'] = 'skill/action'
                     diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
                     action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
 
                 if self.diayn_training:
-
+#skill/action
+                    state['path'] = 'skill/action'
                     logits, value = self.policy.forward_eval(o_device, state)
                     action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
@@ -552,20 +565,27 @@ class PuffeRL:
 
             if not self.diayn_training:
                 mb_skill_choices_flat = mb_skill_choices.reshape(-1)
-                 
+ #obs/skill
+ #forward->encode_observations->decode_actions
+                state['path'] = 'obs/skill'
                 logits, newvalue = self.policy(mb_obs, state)
                 skill_choices, newlogprob, entropy= pufferlib.pytorch.sample_logits(logits, action=mb_skill_choices_flat)
 
                 state['skill'] = self.ohe_skills_tensor[mb_skill_choices_flat]
-                
+#skill/action
+#forward->encode_observations->decode_actions
+
                 with torch.no_grad():
+                    state['path'] = 'skill/action'
                     diayn_logits, diayn_newvalue = self.diayn_policy(mb_obs, state)
                     actions, d_newlogprob, d_entropy = pufferlib.pytorch.sample_logits(diayn_logits, action=mb_actions)
 
 
 
             else:
-
+#skill/action
+#forward->encode_observations->decode_actions
+                state['path'] = 'skill/action'
                 logits, newvalue = self.policy(mb_obs, state)
                 actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 

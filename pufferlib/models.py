@@ -56,8 +56,6 @@ class Default(nn.Module):
                                                 nn.Linear(num_obs, self.hidden_size),
                                                 nn.GELU(),
                                                 )
-
-            
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)
             num_atns = sum(self.action_nvec)
@@ -77,12 +75,8 @@ class Default(nn.Module):
         self.decoder_skill_selector = pufferlib.pytorch.layer_init(
                     nn.Linear(hidden_size, self.diayn_skills), std=0.01)
 
-
-
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
-
-
 
         self.discriminator = nn.Sequential( #############
             nn.Flatten(start_dim=1, end_dim=-1),
@@ -112,7 +106,7 @@ class Default(nn.Module):
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
         else: 
             observations = observations.view(batch_size, -1)
-        if not state or state['skill'] is not None:
+        if state['path'] == 'skill/action' or state['path'] == 'skill/skill':    
             observations = torch.cat((observations, state['skill']), dim = -1)
             return self.encoder(observations.float())
         return self.skill_selector_encoder(observations.float())
@@ -120,7 +114,8 @@ class Default(nn.Module):
     def decode_actions(self, hidden, state=None):
         '''Decodes a batch of hidden states into (multi)discrete actions.
         Assumes no time dimension (handled by LSTM wrappers).'''
-        if not state or state['skill'] is not None:
+            
+        if state['path'] == 'obs/action' or state['path'] == 'skill/action':
             if self.is_multidiscrete:
                 logits = self.decoder(hidden).split(self.action_nvec, dim=1)
             elif self.is_continuous:
@@ -190,7 +185,7 @@ class LSTMWrapper(nn.Module):
         state['hidden'] = hidden
         state['lstm_h'] = hidden
         state['lstm_c'] = c
-        logits, values = self.policy.decode_actions(hidden)
+        logits, values = self.policy.decode_actions(hidden,state)
         return logits, values
 
     def forward(self, observations, state):
@@ -232,7 +227,7 @@ class LSTMWrapper(nn.Module):
         hidden = hidden.transpose(0, 1)
 
         flat_hidden = hidden.reshape(B*TT, self.hidden_size)
-        logits, values = self.policy.decode_actions(flat_hidden)
+        logits, values = self.policy.decode_actions(flat_hidden, state)
         values = values.reshape(B, TT)
         #state.batch_logits = logits.reshape(B, TT, -1)
         state['hidden'] = hidden
