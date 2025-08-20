@@ -104,6 +104,7 @@ class PuffeRL:
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
+        self.skill_choices = torch.zeros(segments, horizon, dtype=torch.long, device=device)#for second phase
 
 
 #DIAYN SETUP
@@ -211,6 +212,7 @@ class PuffeRL:
     def model_and_env_reset_for_diayn_hrl(self, config, vecenv, policy, logger=None):
         self.__init__(config, vecenv, policy, logger)
         self.diayn_training = False
+        
 
         
 
@@ -282,15 +284,15 @@ class PuffeRL:
 
                 if not self.diayn_training:  
 
-
-                    skill_logits, value = self.policy.forward_eval(o_device, state)
-                    skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(skill_logits)
+                    #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
+                    logits, value = self.policy.forward_eval(o_device, state)
+                    skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
                     state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
 
-                    logits, value = self.diayn_policy.forward_eval(o_device, state)
-                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                    diayn_logits, _ = self.diayn_policy.forward_eval(o_device, state)
+                    action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
 
                 if self.diayn_training:
 
@@ -345,6 +347,8 @@ class PuffeRL:
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
                 self.values[batch_rows, l] = value.flatten()
+                if not self.diayn_training:
+                    self.skill_choices[batch_rows, l] = skill_choices.long()
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
@@ -423,6 +427,8 @@ class PuffeRL:
             mb_advantages = advantages[idx]
             mb_skills_seg = self.skills[idx]
             profile('train_forward', epoch)
+            if not self.diayn_training:
+                mb_skill_choices = self.skill_choices[idx]
 
 
             if not config['use_rnn']:
@@ -446,17 +452,16 @@ class PuffeRL:
 
 
             if not self.diayn_training:
+                mb_skill_choices_flat = mb_skill_choices.reshape(-1)
+                 
+                logits, newvalue = self.policy(mb_obs, state)
+                skill_choices, newlogprob, entropy= pufferlib.pytorch.sample_logits(logits, action=mb_skill_choices_flat)
 
-               
-                skill_logits, newvalue = self.policy(mb_obs, state)
-                skill_choices, newlogprob, _= pufferlib.pytorch.sample_logits(skill_logits)
-                
-                mb_skills_ohe = self.ohe_skills_tensor[skill_choices] ####
-                state['mb_skills_ohe'] = mb_skills_ohe
+                state['skill'] = self.ohe_skills_tensor[mb_skill_choices_flat]
                 
                 with torch.no_grad():
-                    logits, newvalue = self.diayn_policy(mb_obs, state)
-                    actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+                    diayn_logits, diayn_newvalue = self.diayn_policy(mb_obs, state)
+                    actions, d_newlogprob, d_entropy = pufferlib.pytorch.sample_logits(diayn_logits, action=mb_actions)
 
 
 
@@ -557,15 +562,37 @@ class PuffeRL:
         #diayn switch to train using skills
         if self.global_step >= config['total_timesteps']/2:
             if not self.diayn_policy:
-                breakpoint()
+                
+                #make the policy that takes skills+obs -> actions not trainable and put it self.in diayn_policy then rebuild pufferl with a new policy do it this way so all the inbuilt stuff works fine 
                 action_policy = self.policy
                 config = self.config
                 env_name = config['env']
                 vecenv = self.vecenv
                 args = load_config(env_name)
                 policy = load_policy(args, vecenv)
-                self.model_and_env_reset_for_diayn_hrl(config, vecenv, policy) 
+                self.model_and_env_reset_for_diayn_hrl(config, vecenv, policy)
+
+
                 self.diayn_policy = action_policy
+                self.diayn_training = False
+                for p in self.diayn_policy.parameters():
+                    p.requires_grad = False
+                self.diayn_policy.eval()  #TODO do we need to do polic.policy
+                
+
+                assert not any(p.requires_grad for p in self.diayn_policy.parameters()), \
+                    "Some DIAYN params still require grad!"
+
+                assert not any(p.requires_grad for p in self.diayn_policy.policy.parameters()), \
+                    "Some DIAYN.policyparams still require grad!"
+    
+                assert any(p.requires_grad for p in self.policy.parameters()), \
+                    "Your trainable policy has no grad-enabled params!"
+
+
+
+
+
          
 
 ########################
