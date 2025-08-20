@@ -291,6 +291,12 @@ class PuffeRL:
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
         self.total_epochs = epochs
         self.epoch = 0
+
+        if self.config['use_rnn']:
+            n = self.vecenv.agents_per_batch
+            h = self.diayn_policy.hidden_size
+            self.diayn_lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+            self.diayn_lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
         
 
 
@@ -365,16 +371,22 @@ class PuffeRL:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
 
-                if not self.diayn_training:  
+                if not self.diayn_training:
+
+                    if config['use_rnn']:
+                        diayn_state = dict(
+                            lstm_h=self.diayn_lstm_h[env_id.start],
+                            lstm_c=self.diayn_lstm_c[env_id.start],
+                        )
 
                     #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
                     logits, value = self.policy.forward_eval(o_device, state)
                     skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
-                    state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
+                    diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
 
-                    diayn_logits, _ = self.diayn_policy.forward_eval(o_device, state)
+                    diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
                     action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
 
                 if self.diayn_training:
@@ -415,6 +427,10 @@ class PuffeRL:
                 if config['use_rnn']:
                     self.lstm_h[env_id.start] = state['lstm_h']
                     self.lstm_c[env_id.start] = state['lstm_c']
+
+                if not self.diayn_training and config['use_rnn']:
+                    self.diayn_lstm_h[env_id.start] = diayn_state['lstm_h']
+                    self.diayn_lstm_c[env_id.start] = diayn_state['lstm_c']
 
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
