@@ -209,9 +209,92 @@ class PuffeRL:
         self.print_dashboard(clear=True)
     
 
-    def model_and_env_reset_for_diayn_hrl(self, config, vecenv, policy, logger=None):
-        self.__init__(config, vecenv, policy, logger)
+    def diayn_next_phase(self):
         self.diayn_training = False
+        action_policy = self.policy
+        env_name = self.config['env']
+        args = load_config(env_name)
+        policy = load_policy(args, self.vecenv)
+        self.diayn_policy = action_policy
+        for p in self.diayn_policy.parameters():
+            p.requires_grad = False
+        assert not any(p.requires_grad for p in self.diayn_policy.parameters()), \
+            "Some DIAYN params still require grad!"
+
+        assert not any(p.requires_grad for p in self.diayn_policy.policy.parameters()), \
+            "Some DIAYN.policyparams still require grad!"
+        
+        
+        config = self.config
+        seed = config['seed']
+        segments = self.segments
+        horizon = config['bptt_horizon']
+        self.vecenv.async_reset(seed)
+        vecenv = self.vecenv
+        obs_space = vecenv.single_observation_space
+        atn_space = vecenv.single_action_space
+        total_agents = vecenv.num_agents
+
+
+#clear all buffers etc
+        device = config['device']
+        self.observations = torch.zeros(segments, horizon, *obs_space.shape,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            pin_memory=device == 'cuda' and config['cpu_offload'],
+            device='cpu' if config['cpu_offload'] else device)
+        self.actions = torch.zeros(segments, horizon, *atn_space.shape, device=device,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
+        self.values = torch.zeros(segments, horizon, device=device)
+        self.logprobs = torch.zeros(segments, horizon, device=device)
+        self.rewards = torch.zeros(segments, horizon, device=device)
+        self.terminals = torch.zeros(segments, horizon, device=device)
+        self.truncations = torch.zeros(segments, horizon, device=device)
+        self.ratio = torch.ones(segments, horizon, device=device)
+        self.importance = torch.ones(segments, horizon, device=device)
+        self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
+        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
+        self.free_idx = total_agents
+        self.skill_choices = torch.zeros(segments, horizon, dtype=torch.long, device=device)#for second phase
+
+        # Torch compile
+        self.uncompiled_policy = policy
+        self.policy = policy
+        if config['compile']:
+            self.policy = torch.compile(policy, mode=config['compile_mode'], fullgraph=config['compile_fullgraph'])
+
+        # Optimizer
+        if config['optimizer'] == 'adam':
+            optimizer = torch.optim.Adam(
+                self.policy.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+            )
+        elif config['optimizer'] == 'muon':
+            from heavyball import ForeachMuon
+            warnings.filterwarnings(action='ignore', category=UserWarning, module=r'heavyball.*')
+            import heavyball.utils
+            heavyball.utils.compile_mode = config['compile_mode'] if config['compile'] else None
+            optimizer = ForeachMuon(
+                self.policy.parameters(),
+                lr=config['learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+            )
+        else:
+            raise ValueError(f'Unknown optimizer: {config["optimizer"]}')
+
+        self.optimizer = optimizer
+
+# Learning rate scheduler
+        epochs = config['total_timesteps']/2 // config['batch_size'] #NOTE THIS IS HALVED IN PHASE2
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+        self.total_epochs = epochs
+        self.epoch = 0
+        
+
+
+              
         
 
         
@@ -562,38 +645,7 @@ class PuffeRL:
         #diayn switch to train using skills
         if self.global_step >= config['total_timesteps']/2:
             if not self.diayn_policy:
-                
-                #make the policy that takes skills+obs -> actions not trainable and put it self.in diayn_policy then rebuild pufferl with a new policy do it this way so all the inbuilt stuff works fine 
-                action_policy = self.policy
-                config = self.config
-                env_name = config['env']
-                vecenv = self.vecenv
-                args = load_config(env_name)
-                policy = load_policy(args, vecenv)
-                self.model_and_env_reset_for_diayn_hrl(config, vecenv, policy)
-
-
-                self.diayn_policy = action_policy
-                self.diayn_training = False
-                for p in self.diayn_policy.parameters():
-                    p.requires_grad = False
-                self.diayn_policy.eval()  #TODO do we need to do polic.policy
-                
-
-                assert not any(p.requires_grad for p in self.diayn_policy.parameters()), \
-                    "Some DIAYN params still require grad!"
-
-                assert not any(p.requires_grad for p in self.diayn_policy.policy.parameters()), \
-                    "Some DIAYN.policyparams still require grad!"
-    
-                assert any(p.requires_grad for p in self.policy.parameters()), \
-                    "Your trainable policy has no grad-enabled params!"
-
-
-
-
-
-         
+                self.diayn_next_phase()
 
 ########################
 
