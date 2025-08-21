@@ -108,12 +108,13 @@ class PuffeRL:
 
 
 #DIAYN SETUP
-        self.num_skills = config['num_skills']
+        self.num_skills = config['diayn_skills']
         self.k = config['k']
         self.ohe_skills_tensor = torch.eye(self.num_skills, device= device)
         self.skills = torch.randint(0, self.num_skills, (segments,), device=device)
         self.diayn_training = True
         self.diayn_policy = None
+
         
 
         # LSTM
