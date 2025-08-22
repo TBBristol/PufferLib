@@ -318,6 +318,38 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
+
+    def multi_step_interruptible(self, vecenv, initial_actions, inital_ids, stop_fn=None, k_max= None, k_min=None):
+
+        initial_ids = np.asarray(initial_ids)
+        pos = {int(e): i for i, e in enumerate(initial_ids)}
+        
+        #TODO torch and device?
+
+        r_acc = None
+        last_obs = None
+        d_gg = np.zeros(self.total_agents, dtype=bool)
+        t_agg = np.zeros(self.total_agents, dtype=bool)
+        steps = np.zeros(self.total_agents, dtype=int32)
+        done_macro = np.zeros(self.total_agents, dtype=bool)
+
+        lastids = np.copy(initial_ids)
+
+        while not np.all(done_macro):
+            
+
+            idx_send = np.fromiter((pos[i] for i in last_ids), dtype = int, count = len(last_ids))
+            vecenv.send()
+
+
+
+        
+
+
+
+
+
+
     def evaluate(self):
         profile = self.profile
         epoch = self.epoch
@@ -336,6 +368,7 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            breakpoint()
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1) #comes back as an array 0 to 4091 (4092,)
 
@@ -487,7 +520,9 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile('env', epoch)
+           
             self.vecenv.send(action)
+
 
         profile('eval_misc', epoch)
         self.free_idx = self.total_agents
@@ -498,6 +533,7 @@ class PuffeRL:
 
     @record
     def train(self):
+        breakpoint()
         profile = self.profile
         epoch = self.epoch
         profile('train', epoch)
