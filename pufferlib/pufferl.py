@@ -319,29 +319,7 @@ class PuffeRL:
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
 
-    def multi_step_interruptible(self, vecenv, initial_actions, inital_ids, stop_fn=None, k_max= None, k_min=None):
-
-        initial_ids = np.asarray(initial_ids)
-        pos = {int(e): i for i, e in enumerate(initial_ids)}
-        
-        #TODO torch and device?
-
-        r_acc = None
-        last_obs = None
-        d_gg = np.zeros(self.total_agents, dtype=bool)
-        t_agg = np.zeros(self.total_agents, dtype=bool)
-        steps = np.zeros(self.total_agents, dtype=int32)
-        done_macro = np.zeros(self.total_agents, dtype=bool)
-
-        lastids = np.copy(initial_ids)
-
-        while not np.all(done_macro):
-            
-
-            idx_send = np.fromiter((pos[i] for i in last_ids), dtype = int, count = len(last_ids))
-            vecenv.send()
-
-
+   
 
         
 
@@ -351,6 +329,28 @@ class PuffeRL:
 
 
     def evaluate(self):
+        
+
+        #prehaps we can do this once but lets just get it working 
+
+
+        env_active = np.zeros(self.total_agents, dtype=bool)
+        env_k_left = np.zeros(self.total_agents, dtype=int32)
+        env_r_sum = np.zeros(self.total_agents, dtype=float32)
+        env_micro_steps = np.zeros(self.total_agents, dtype=int32)
+        env_dones = np.zeros(self.total_agents, dtype=bool)
+        env_terminals = np.zeros(self.total_agents, dtype=bool)
+        env_start_obs = np.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=float32)
+        env_finish_obs = np.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=float32)
+        env_micro_action = np.zeros((self.total_agents, *self.vecenv.single_action_space.shape), dtype=float32)
+        env_value = np.zeros(self.total_agents, dtype=float32)
+        env_logprob = np.zeros(self.total_agents, dtype=float32)
+        env_entropy = np.zeros(self.total_agents, dtype=float32)
+        env_skill_choices = np.zeros(self.total_agents, dtype=float32)
+
+
+
+
         profile = self.profile
         epoch = self.epoch
         profile('eval', epoch)
@@ -367,18 +367,25 @@ class PuffeRL:
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile('env', epoch)
+
+
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            breakpoint()
+
+            ids = np.asarray(env_id)
+
+            need_action = ~env_active[ids]
+    
+
             profile('eval_misc', epoch)
-            env_id = slice(env_id[0], env_id[-1] + 1) #comes back as an array 0 to 4091 (4092,)
+            env_id = slice(env_id[0], env_id[-1] + 1) #comes back as an array (4092,) but cycles thru total_agents
 
 #env_id.start and env_id.stop reference the env Ids being used note stop is +1 at end?
 
 
-            done_mask = d + t # TODO: Handle truncations separately
+            #done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
-            profile('eval_copy', epoch)
+            #profile('eval_copy', epoch)
             o = torch.as_tensor(o)
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
@@ -386,54 +393,55 @@ class PuffeRL:
             profile('eval_forward', epoch)
             
 
-            if self.diayn_training:
-                skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
-            else: 
-                skill = None
+            if need_action.any(): #first time or envs that finshed micro steps
 
-#Need to use state to tell polices what path to use for input output in/out skill in implies obs+skill concat. 
-#skill/skill
-#skill/ action
-#obs/skill
-#obs/action
+                if self.diayn_training:
+                    skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
+                else: 
+                    skill = None
+
+    #Need to use state to tell polices what path to use for input output in/out skill in implies obs+skill concat. 
+    #skill/skill
+    #skill/ action
+    #obs/skill
+    #obs/action
 
 
-
-            with torch.no_grad(), self.amp_context:
-                state = dict(
-                    reward=r,
-                    done=d,
-                    env_id=env_id,
-                    mask=mask,
-                    path = None, #for polices to ensure takes right encoder/decoder
-                    skill=skill, ######################## diayn stuff
-                )
-
-                if config['use_rnn']:
-                    state['lstm_h'] = self.lstm_h[env_id.start]
-                    state['lstm_c'] = self.lstm_c[env_id.start]
-
-                if not self.diayn_training:
+                with torch.no_grad(), self.amp_context:
+                    state = dict( #TODO does this affect stuff now we are microing steps?
+                        reward=r,
+                        done=d,
+                        env_id=env_id,
+                        mask=mask,
+                        path = None, #for polices to ensure takes right encoder/decoder
+                        skill=skill, ######################## diayn stuff
+                    )
 
                     if config['use_rnn']:
-                        diayn_state = dict(
-                            lstm_h=self.diayn_lstm_h[env_id.start],
-                            lstm_c=self.diayn_lstm_c[env_id.start],
-                        )
+                        state['lstm_h'] = self.lstm_h[env_id.start]
+                        state['lstm_c'] = self.lstm_c[env_id.start]
 
-                    #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
+                    if not self.diayn_training:
 
-#obs/skill
-                    state['path'] = 'obs/skill'
-                    logits, value = self.policy.forward_eval(o_device, state)
-                    skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                    
-                    diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
+                        if config['use_rnn']:
+                            diayn_state = dict(
+                                lstm_h=self.diayn_lstm_h[env_id.start],
+                                lstm_c=self.diayn_lstm_c[env_id.start],
+                            )
 
-#skill/action
-                    diayn_state['path'] = 'skill/action'
-                    diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
-                    action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
+                        #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
+
+    #obs/skill
+                        state['path'] = 'obs/skill'
+                        logits, value = self.policy.forward_eval(o_device, state)
+                        skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                        
+                        diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
+
+    #skill/action
+                        diayn_state['path'] = 'skill/action'
+                        diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
+                        action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
 
                 if self.diayn_training:
 #skill/action
@@ -463,13 +471,70 @@ class PuffeRL:
 
 
 
+                #Start the macro buffer for those that need it
+                env_micro_action[env_id[need_action]] = action
+                env_k_left[env_id[need_action]] = self.k
+                env_r_sum[env_id[need_action]] = 0.0
+                env_micro_steps[env_id[need_action]] = 0
+                env_dones[env_id[need_action]] = False
+                env_terminals[env_id[need_action]] = False
+                env_start_obs[env_id[need_action]] = o[need_action]
+                env_active[env_id[need_action]] = True
+                env_value[env_id[need_action]] = value
+                env_logprob[env_id[need_action]] = logprob
+                env_entropy[env_id[need_action]] = entropy
+                env_skill_choices[env_id[need_action]] = skill_choices
+    
 
-                r = torch.clamp(r, -1, 1)
+            r = torch.clamp(r, -1, 1)
                 
+            active_envs = env_active[env_id]
+            if active_envs.any():
+                rows = env_id[active_envs]
+                env_r_sum[rows] += r[active_envs]
+                env_dones[rows] = d[active_envs]
+                env_terminals[rows] = t[active_envs]
+                env_micro_steps[rows] += 1
+                env_k_left[rows] -= 1
+                env_finish_obs[rows] = o[active_envs]
 
 
+            #Termination for micro steps actions
+
+            stop_action = np.zeros_like(active_envs, dtype=bool)
+
+            #TODO: not yet implemented works off k can use stophead policy in future
+            """if active_envs.any(): 
+                stop_action[active_envs] = stop_fn(active_envs) #TODO
+"""
+
+            finished_mask = np.zeros_like(env_id, dtype = bool)
+            if active_envs.any():
+                rows = env_id[active_envs]
+                finished_mask[active_envs] = (stop_action[active_envs] |
+                                              env_dones[rows] |
+                                              env_terminals[rows] |
+                                              (env_k_left[rows] <= 0)
+                                              )
+            finished = []
+            if finished_mask.any():
+                finished_ids = env_id[finished_mask]
+                for eid in finished_ids:
+                    finished.append((int(eid),
+                                     env_start_obs[eid].copy(),
+                                     env_start_actions[eid].copy(),
+                                     float(env_r_sim[eid]),
+                                     bool(env_dones[eid]),
+                                     bool(env_terminals[eid]),
+                                     int(env_micro_steps[eid]),
+                                     env_finish_obs[eid].copy(),
+                        ))
+                    env_active[eid] = False
+
+            
 
             profile('eval_copy', epoch)
+
             with torch.no_grad():
                 if config['use_rnn']:
                     self.lstm_h[env_id.start] = state['lstm_h']
@@ -479,20 +544,43 @@ class PuffeRL:
                     self.diayn_lstm_h[env_id.start] = diayn_state['lstm_h']
                     self.diayn_lstm_c[env_id.start] = diayn_state['lstm_c']
 
+
+                for eid, start_obs, start_action, r_sum, dones, truncs, micro_steps, finish_obs in finished:    
+                
+
+
+
+                    
                 # Fast path for fully vectorized envs
-                l = self.ep_lengths[env_id.start].item()
-                batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+                #l = self.ep_lengths[env_id.start].item()
+                #batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
 
-                if config['cpu_offload']:
-                    self.observations[batch_rows, l] = o
-                else:
-                    self.observations[batch_rows, l] = o_device
 
-                self.actions[batch_rows, l] = action
-                self.logprobs[batch_rows, l] = logprob
-                self.rewards[batch_rows, l] = r
-                self.terminals[batch_rows, l] = d.float()
-                self.values[batch_rows, l] = value.flatten()
+                batch_rows = self.ep_indices[eid].item()
+                l = self.ep_lengths[eid].item()
+
+
+                #TODO figure device out if we cna make all this faster and on GPU etc
+                #if config['cpu_offload']:
+                    #self.observations[batch_rows, l] = o
+                #else:
+                    #self.observations[batch_rows, l] = o_device
+
+                self.actions[batch_rows, l] = torch.as_tensor(start_action, device=device)
+                self.rewards[batch_rows, l] = torch.as_tensor(r_sum, device = device) #TODO summed r breaks clamp
+                self.terminals[batch_rows, l] = torch.as_tensor(float(dones), device = device)
+                #self.micro_durations[batch_rows, l] = torch.as_tensor(micro_steps, device = device)
+                #self.finish_obs[batch_rows, l] = torch.as_tensor(finish_obs, device = device)
+
+
+#TODO NEED TO FIGURE HOW TO WRITE THIS ALL NOW basically form the for loop which needs to go anyway
+
+
+#figre values and logproibs and diayn skils 
+                self.logprobs[batch_rows, l] = env_logprob[eid]
+                self.values[batch_rows, l] = env_value[eid]value.flatten()
+
+
                 if not self.diayn_training:
                     self.skill_choices[batch_rows, l] = skill_choices.long()
 
@@ -521,7 +609,11 @@ class PuffeRL:
 
             profile('env', epoch)
            
-            self.vecenv.send(action)
+
+            actions_to_send = env_micro_action[env_id]
+
+
+            self.vecenv.send(actions_to_send)
 
 
         profile('eval_misc', epoch)
