@@ -121,8 +121,15 @@ class PuffeRL:
         if config['use_rnn']:
             n = vecenv.agents_per_batch
             h = policy.hidden_size
-            self.lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
-            self.lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+           #self.lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+            #self.lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+            self.lstm_h = torch.zeros(total_agents, h, device=device)
+            self.lstm_c = torch.zeros(total_agents, h, device=device)
+
+
+
+
+
 
         # Minibatching & gradient accumulation
         minibatch_size = config['minibatch_size']
@@ -208,6 +215,19 @@ class PuffeRL:
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
+
+
+        finished_mask = np.zeros(total_agents, dtype = bool)
+
+        space = self.vecenv.single_action_space
+        if isinstance(space, (pufferlib.spaces.Discrete, pufferlib.spaces.MultiDiscrete, pufferlib.spaces.MultiBinary)):
+            self.action_type = torch.int32               
+        elif isinstance(space, pufferlib.spaces.Box):
+            self.action_type = torch.float32        # env wants floats
+        else:
+            raise NotImplementedError(f"Unsupported action space: {type(space)}")
+
+
     
 
     def diayn_next_phase(self):
@@ -296,9 +316,14 @@ class PuffeRL:
         if self.config['use_rnn']:
             n = self.vecenv.agents_per_batch
             h = self.diayn_policy.hidden_size
-            self.diayn_lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
-            self.diayn_lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
-        
+           # self.diayn_lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+            #self.diayn_lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
+            self.diayn_lstm_h = torch.zeros(total_agents, h, device=device)
+            self.diayn_lstm_c = torch.zeros(total_agents, h, device=device)
+
+        finished_mask = np.zeros(total_agents, dtype = bool)    
+
+
 
 
               
@@ -329,40 +354,38 @@ class PuffeRL:
 
 
     def evaluate(self):
+
+        config = self.config
+        device = config['device']
+        atn_space = self.vecenv.single_action_space
+        full_mask = torch.zeros(self.total_agents, dtype=torch.bool, device=device)
+
+        env_active= torch.zeros(self.total_agents, dtype=torch.bool, device=device)
+        env_k_left = torch.zeros(self.total_agents, dtype=torch.int32, device=device)
+        env_r_sum = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
+        env_micro_steps = torch.zeros(self.total_agents, dtype=torch.int32, device=device)
+        env_dones = torch.zeros(self.total_agents, dtype=torch.bool, device=device)
+        env_terminals = torch.zeros(self.total_agents, dtype=torch.bool, device=device)
+        env_start_obs = torch.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=torch.float32, device=device)
+        env_finish_obs = torch.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=torch.float32, device=device)
+        env_micro_action = torch.zeros(self.total_agents, *atn_space.shape, device=device,dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
+        env_value = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
+        env_logprob = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
+        env_entropy = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
+        env_skill_choices = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
         
-
-        #prehaps we can do this once but lets just get it working 
-
-
-        env_active = np.zeros(self.total_agents, dtype=bool)
-        env_k_left = np.zeros(self.total_agents, dtype=int32)
-        env_r_sum = np.zeros(self.total_agents, dtype=float32)
-        env_micro_steps = np.zeros(self.total_agents, dtype=int32)
-        env_dones = np.zeros(self.total_agents, dtype=bool)
-        env_terminals = np.zeros(self.total_agents, dtype=bool)
-        env_start_obs = np.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=float32)
-        env_finish_obs = np.zeros((self.total_agents, *self.vecenv.single_observation_space.shape), dtype=float32)
-        env_micro_action = np.zeros((self.total_agents, *self.vecenv.single_action_space.shape), dtype=float32)
-        env_value = np.zeros(self.total_agents, dtype=float32)
-        env_logprob = np.zeros(self.total_agents, dtype=float32)
-        env_entropy = np.zeros(self.total_agents, dtype=float32)
-        env_skill_choices = np.zeros(self.total_agents, dtype=float32)
-
-
-
-
+        if config['use_rnn']:
+            self.lstm_h.zero_()
+            self.lstm_c.zero_()
+            if not self.diayn_training:
+                self.diayn_lstm_h.zero_()
+                self.diayn_lstm_c.zero_()
+            
         profile = self.profile
         epoch = self.epoch
         profile('eval', epoch)
         profile('eval_misc', epoch, nest=True)
 
-        config = self.config
-        device = config['device']
-
-        if config['use_rnn']:
-            for k in self.lstm_h:
-                self.lstm_h[k].zero_()
-                self.lstm_c[k].zero_()
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -371,231 +394,191 @@ class PuffeRL:
 
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
-            ids = np.asarray(env_id)
 
+            ids = torch.tensor(env_id, device=device, dtype=torch.long)
             need_action = ~env_active[ids]
     
 
             profile('eval_misc', epoch)
-            env_id = slice(env_id[0], env_id[-1] + 1) #comes back as an array (4092,) but cycles thru total_agents
 
-#env_id.start and env_id.stop reference the env Ids being used note stop is +1 at end?
-
-
-            #done_mask = d + t # TODO: Handle truncations separately
+            done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
-            #profile('eval_copy', epoch)
+            profile('eval_copy', epoch)
             o = torch.as_tensor(o)
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, no:n_blocking=True)
             profile('eval_forward', epoch)
             
-
             if need_action.any(): #first time or envs that finshed micro steps
+                
+                need_action_set = need_action.nonzero().squeeze(1)
+                need_action_ids = ids[need_action_set]
+                o_need_act = o_device[need_action_set] 
+                
 
                 if self.diayn_training:
-                    skill = self.ohe_skills_tensor[self.skills[env_id]] ######### diyayn stuff
+                    skill = self.ohe_skills_tensor[self.skills[need_action_ids]] 
                 else: 
                     skill = None
 
-    #Need to use state to tell polices what path to use for input output in/out skill in implies obs+skill concat. 
-    #skill/skill
-    #skill/ action
-    #obs/skill
-    #obs/action
-
-
                 with torch.no_grad(), self.amp_context:
-                    state = dict( #TODO does this affect stuff now we are microing steps?
-                        reward=r,
-                        done=d,
-                        env_id=env_id,
-                        mask=mask,
+                    state = dict( 
+                        reward=r[need_action_set],
+                        done=d[need_action_set],
+                        env_id=ids[need_action_set],
+                        mask=mask[need_action_set.cpu().numpy()],
                         path = None, #for polices to ensure takes right encoder/decoder
-                        skill=skill, ######################## diayn stuff
+                        skill=skill[need_action_set], ######################## diayn stuff
                     )
 
                     if config['use_rnn']:
-                        state['lstm_h'] = self.lstm_h[env_id.start]
-                        state['lstm_c'] = self.lstm_c[env_id.start]
+                         state['lstm_h'] = torch.index_select(self.lstm_h, 0, need_action_ids) #index_select gives new tensor
+                         state['lstm_c'] = torch.index_select(self.lstm_c, 0, need_action_ids)
+
 
                     if not self.diayn_training:
 
-                        if config['use_rnn']:
-                            diayn_state = dict(
-                                lstm_h=self.diayn_lstm_h[env_id.start],
-                                lstm_c=self.diayn_lstm_c[env_id.start],
-                            )
+                        diayn_state = dict()
+                        diayn_state['lstm_h'] = torch.index_select(self.diayn_lstm_h, 0, need_action_ids)   
+                        diayn_state['lstm_c'] = torch.index_select(self.diayn_lstm_c, 0, need_action_ids)
+                        
 
                         #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
 
-    #obs/skill
+                        #obs/skill
                         state['path'] = 'obs/skill'
-                        logits, value = self.policy.forward_eval(o_device, state)
+                        logits, value = self.policy.forward_eval(o_need_act, state)
                         skill_choices, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                         
                         diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
-    #skill/action
+                        #skill/action
                         diayn_state['path'] = 'skill/action'
-                        diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
+                        diayn_logits, _ = self.diayn_policy.forward_eval(o_need_act, diayn_state)
                         action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
 
-                if self.diayn_training:
-#skill/action
-                    state['path'] = 'skill/action'
-                    logits, value = self.policy.forward_eval(o_device, state)
-                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                    if self.diayn_training:
+                        #skill/action
+                        state['path'] = 'skill/action'
+                        logits, value = self.policy.forward_eval(o_need_act, state)
+                        action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
+                with torch.no_grad():
+                    if self.diayn_training:
+                        diayn_logits = self.policy.policy.discriminator(o_need_act)
+                        diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+                        
+                        skills_for_envs = self.skills[ids]
+                        diayn_logq = diayn_logprob.gather(1, skills_for_envs.unsqueeze(1)).squeeze(1)
+
+                        k = torch.tensor(self.num_skills, device = device)
+
+                        diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
+                        diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+
+                        r = diayn_intrinsic
+                        self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
 
 
-                    #diaynstuff ###########
-                    diayn_logits = self.policy.policy.discriminator(o_device)
-                    diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+                with torch.no_grad():
+                  
+
+                    if config['use_rnn']:
+                        self.lstm_h.index_copy_(0, need_action_ids, state['lstm_h'])
+                        self.lstm_c.index_copy_(0, need_action_ids, state['lstm_c'])
 
 
-                    row = torch.arange(env_id.stop - env_id.start, device=diayn_logprob.device)
+                        if not self.diayn_training:                        
+                            self.diayn_lstm_h.index_copy_(0, need_action_ids, diayn_state['lstm_h'])
+                            self.diayn_lstm_c.index_copy_(0, need_action_ids, diayn_state['lstm_c'])
+                
+            if need_action.any():
+                env_micro_action[ids[need_action]] = action.to(env_micro_action.dtype)
+                env_k_left[ids[need_action]] = self.k
+                env_r_sum[ids[need_action]] = 0.0
+                env_micro_steps[ids[need_action]] = 0
+                env_dones[ids[need_action]] = False
+                env_terminals[ids[need_action]] = False
+                env_start_obs[ids[need_action]] = o_device[need_action]
+                env_active[ids[need_action]] = True
+                env_value[ids[need_action]] = value.squeeze()
+                env_logprob[ids[need_action]] = logprob
+                if not self.diayn_training:
+                    env_skill_choices[ids[need_action]] = skill_choices.squeeze().to(torch.float32)
 
-
-                    
-                    diayn_logq = diayn_logprob[row, self.skills[env_id]].to(diayn_logprob.device)
-
-                    k = torch.tensor(self.num_skills, device = device)
-
-                    diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
-                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
-
-                    r = diayn_intrinsic
-                    self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
-
-
-
-                #Start the macro buffer for those that need it
-                env_micro_action[env_id[need_action]] = action
-                env_k_left[env_id[need_action]] = self.k
-                env_r_sum[env_id[need_action]] = 0.0
-                env_micro_steps[env_id[need_action]] = 0
-                env_dones[env_id[need_action]] = False
-                env_terminals[env_id[need_action]] = False
-                env_start_obs[env_id[need_action]] = o[need_action]
-                env_active[env_id[need_action]] = True
-                env_value[env_id[need_action]] = value
-                env_logprob[env_id[need_action]] = logprob
-                env_entropy[env_id[need_action]] = entropy
-                env_skill_choices[env_id[need_action]] = skill_choices
-    
 
             r = torch.clamp(r, -1, 1)
                 
             active_envs = env_active[env_id]
             if active_envs.any():
-                rows = env_id[active_envs]
+                rows = ids[active_envs]
                 env_r_sum[rows] += r[active_envs]
                 env_dones[rows] = d[active_envs]
-                env_terminals[rows] = t[active_envs]
+                env_terminals[rows] = torch.from_numpy(t).to(device)[active_envs]
                 env_micro_steps[rows] += 1
                 env_k_left[rows] -= 1
-                env_finish_obs[rows] = o[active_envs]
+                env_finish_obs[rows] = o_device[active_envs]
 
 
             #Termination for micro steps actions
 
-            stop_action = np.zeros_like(active_envs, dtype=bool)
+            stop_action = torch.zeros_like(active_envs, dtype=bool)
 
             #TODO: not yet implemented works off k can use stophead policy in future
             """if active_envs.any(): 
                 stop_action[active_envs] = stop_fn(active_envs) #TODO
-"""
+                """
 
-            finished_mask = np.zeros_like(env_id, dtype = bool)
+            finished_mask = torch.zeros_like(ids, dtype = bool)
             if active_envs.any():
-                rows = env_id[active_envs]
+                rows = ids[active_envs]
                 finished_mask[active_envs] = (stop_action[active_envs] |
                                               env_dones[rows] |
                                               env_terminals[rows] |
                                               (env_k_left[rows] <= 0)
                                               )
-            finished = []
-            if finished_mask.any():
-                finished_ids = env_id[finished_mask]
-                for eid in finished_ids:
-                    finished.append((int(eid),
-                                     env_start_obs[eid].copy(),
-                                     env_start_actions[eid].copy(),
-                                     float(env_r_sim[eid]),
-                                     bool(env_dones[eid]),
-                                     bool(env_terminals[eid]),
-                                     int(env_micro_steps[eid]),
-                                     env_finish_obs[eid].copy(),
-                        ))
-                    env_active[eid] = False
-
-            
 
             profile('eval_copy', epoch)
 
-            with torch.no_grad():
-                if config['use_rnn']:
-                    self.lstm_h[env_id.start] = state['lstm_h']
-                    self.lstm_c[env_id.start] = state['lstm_c']
-
-                if not self.diayn_training and config['use_rnn']:
-                    self.diayn_lstm_h[env_id.start] = diayn_state['lstm_h']
-                    self.diayn_lstm_c[env_id.start] = diayn_state['lstm_c']
-
-
-                for eid, start_obs, start_action, r_sum, dones, truncs, micro_steps, finish_obs in finished:    
                 
+            if full_mask.any():
+                finished_mask = finished_mask & ~full_mask[ids] #dont fill full rows
+            
+            if finished_mask.any():
+                finished_ids = ids[finished_mask]
+                env_active[finished_ids] = False
 
+                rows = self.ep_indices[finished_ids]
+                l = self.ep_lengths[finished_ids]
 
-
-                    
-                # Fast path for fully vectorized envs
-                #l = self.ep_lengths[env_id.start].item()
-                #batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
-
-
-                batch_rows = self.ep_indices[eid].item()
-                l = self.ep_lengths[eid].item()
-
-
-                #TODO figure device out if we cna make all this faster and on GPU etc
-                #if config['cpu_offload']:
-                    #self.observations[batch_rows, l] = o
-                #else:
-                    #self.observations[batch_rows, l] = o_device
-
-                self.actions[batch_rows, l] = torch.as_tensor(start_action, device=device)
-                self.rewards[batch_rows, l] = torch.as_tensor(r_sum, device = device) #TODO summed r breaks clamp
-                self.terminals[batch_rows, l] = torch.as_tensor(float(dones), device = device)
-                #self.micro_durations[batch_rows, l] = torch.as_tensor(micro_steps, device = device)
-                #self.finish_obs[batch_rows, l] = torch.as_tensor(finish_obs, device = device)
-
-
-#TODO NEED TO FIGURE HOW TO WRITE THIS ALL NOW basically form the for loop which needs to go anyway
-
-
-#figre values and logproibs and diayn skils 
-                self.logprobs[batch_rows, l] = env_logprob[eid]
-                self.values[batch_rows, l] = env_value[eid]value.flatten()
-
+                
+                self.actions[rows, l] = env_micro_action[finished_ids].long()
+                self.values[rows, l] = env_value[finished_ids]
+                self.logprobs[rows, l] = env_logprob[finished_ids]
+                self.rewards[rows, l] = env_r_sum[finished_ids]
+                self.terminals[rows, l] = env_dones[finished_ids].to(torch.float32)
 
                 if not self.diayn_training:
-                    self.skill_choices[batch_rows, l] = skill_choices.long()
+                    self.skill_choices[rows, l] = env_skill_choices[finished_ids].to(self.skill_choices.dtype)
 
+        #TODO HERE______ 
                 # Note: We are not yet handling masks in this version
-                self.ep_lengths[env_id] += 1
-                if l+1 >= config['bptt_horizon']:
-                    num_full = env_id.stop - env_id.start
-                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
-                    self.ep_lengths[env_id] = 0
-                    self.free_idx += num_full
-                    self.full_rows += num_full
+                self.ep_lengths[finished_ids] += 1
+                full_mask = self.ep_lengths >= config['bptt_horizon']
 
-                action = action.cpu().numpy()
-                if isinstance(logits, torch.distributions.Normal):
-                    action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
+                if full_mask.any():
+                    num_full = full_mask.sum()
+                    self.full_rows = num_full
+
+                        
+
+            actions_to_send = env_micro_action[env_id]
+
+            action = actions_to_send.cpu().numpy()
+            if isinstance(logits, torch.distributions.Normal):
+                action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
 
             profile('eval_misc', epoch)
             for i in info:
@@ -608,12 +591,12 @@ class PuffeRL:
                         self.stats[k].append(v)
 
             profile('env', epoch)
-           
-
-            actions_to_send = env_micro_action[env_id]
+            assert action.shape == self.vecenv.action_space.shape, f"{action.shape=} vs {self.vecenv.action_space.shape=}"
 
 
-            self.vecenv.send(actions_to_send)
+            self.vecenv.send(action)
+
+            
 
 
         profile('eval_misc', epoch)
@@ -625,7 +608,6 @@ class PuffeRL:
 
     @record
     def train(self):
-        breakpoint()
         profile = self.profile
         epoch = self.epoch
         profile('train', epoch)
@@ -694,15 +676,15 @@ class PuffeRL:
 
             if not self.diayn_training:
                 mb_skill_choices_flat = mb_skill_choices.reshape(-1)
- #obs/skill
- #forward->encode_observations->decode_actions
+                 #obs/skill
+                 #forward->encode_observations->decode_actions
                 state['path'] = 'obs/skill'
                 logits, newvalue = self.policy(mb_obs, state)
                 skill_choices, newlogprob, entropy= pufferlib.pytorch.sample_logits(logits, action=mb_skill_choices_flat)
 
                 state['skill'] = self.ohe_skills_tensor[mb_skill_choices_flat]
-#skill/action
-#forward->encode_observations->decode_actions
+                #skill/action
+                #forward->encode_observations->decode_actions
 
                 with torch.no_grad():
                     state['path'] = 'skill/action'
@@ -712,8 +694,8 @@ class PuffeRL:
 
 
             else:
-#skill/action
-#forward->encode_observations->decode_actions
+                #skill/action
+                #forward->encode_observations->decode_actions
                 state['path'] = 'skill/action'
                 logits, newvalue = self.policy(mb_obs, state)
                 actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -735,8 +717,8 @@ class PuffeRL:
 
             adv = advantages[idx]
             adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
-                ratio, adv, config['gamma'], config['gae_lambda'],
-                config['vtrace_rho_clip'], config['vtrace_c_clip'])
+            ratio, adv, config['gamma'], config['gae_lambda'],
+            config['vtrace_rho_clip'], config['vtrace_c_clip'])
             adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
             
