@@ -396,7 +396,7 @@ class PuffeRL:
 
 
             ids = torch.tensor(env_id, device=device, dtype=torch.long)
-            need_action = ~env_active[ids]
+            need_action = ~env_active[ids] #mask of envs that need action
     
 
             profile('eval_misc', epoch)
@@ -413,8 +413,8 @@ class PuffeRL:
             
             if need_action.any(): #first time or envs that finshed micro steps
                 
-                need_action_set = need_action.nonzero().squeeze(1)
-                need_action_ids = ids[need_action_set]
+                need_action_set = need_action.nonzero().squeeze(1)  #indices of nonzero ie Trues
+                need_action_ids = ids[need_action_set] #absoluite ids of envs that need action
                 o_need_act = o_device[need_action_set] 
                 
 
@@ -430,7 +430,7 @@ class PuffeRL:
                         env_id=ids[need_action_set],
                         mask=mask[need_action_set.cpu().numpy()],
                         path = None, #for polices to ensure takes right encoder/decoder
-                        skill=skill[need_action_set], ######################## diayn stuff
+                        skill=skill, ######################## diayn stuff
                     )
 
                     if config['use_rnn']:
@@ -465,22 +465,6 @@ class PuffeRL:
                         logits, value = self.policy.forward_eval(o_need_act, state)
                         action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
-                with torch.no_grad():
-                    if self.diayn_training:
-                        diayn_logits = self.policy.policy.discriminator(o_need_act)
-                        diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
-                        
-                        skills_for_envs = self.skills[ids]
-                        diayn_logq = diayn_logprob.gather(1, skills_for_envs.unsqueeze(1)).squeeze(1)
-
-                        k = torch.tensor(self.num_skills, device = device)
-
-                        diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
-                        diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
-
-                        r = diayn_intrinsic
-                        self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
-
 
                 with torch.no_grad():
                   
@@ -494,20 +478,39 @@ class PuffeRL:
                             self.diayn_lstm_h.index_copy_(0, need_action_ids, diayn_state['lstm_h'])
                             self.diayn_lstm_c.index_copy_(0, need_action_ids, diayn_state['lstm_c'])
                 
-            if need_action.any():
-                env_micro_action[ids[need_action]] = action.to(env_micro_action.dtype)
-                env_k_left[ids[need_action]] = self.k
-                env_r_sum[ids[need_action]] = 0.0
-                env_micro_steps[ids[need_action]] = 0
-                env_dones[ids[need_action]] = False
-                env_terminals[ids[need_action]] = False
-                env_start_obs[ids[need_action]] = o_device[need_action]
-                env_active[ids[need_action]] = True
-                env_value[ids[need_action]] = value.squeeze()
-                env_logprob[ids[need_action]] = logprob
-                if not self.diayn_training:
-                    env_skill_choices[ids[need_action]] = skill_choices.squeeze().to(torch.float32)
 
+                if isinstance(logits, torch.distributions.Normal):
+                            action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
+
+                env_micro_action[need_action_ids] = action.to(env_micro_action.dtype)
+                env_k_left[need_action_ids] = self.k
+                env_r_sum[need_action_ids] = 0.0
+                env_micro_steps[need_action_ids]= 0
+                env_dones[need_action_ids] = False
+                env_terminals[need_action_ids] = False
+                env_start_obs[need_action_ids] = o_device[need_action_set]
+                env_active[need_action_ids] = True
+                env_value[need_action_ids] = value.squeeze()
+                env_logprob[need_action_ids] = logprob
+                if not self.diayn_training:
+                    env_skill_choices[need_action_ids] = skill_choices.squeeze().to(torch.float32)
+
+
+            with torch.no_grad():
+                if self.diayn_training:
+                    diayn_logits = self.policy.policy.discriminator(o_device)
+                    diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+                    
+                    skills_for_envs = self.skills[ids]
+                    diayn_logq = diayn_logprob.gather(1, skills_for_envs.unsqueeze(1)).squeeze(1)
+
+                    k = torch.tensor(self.num_skills, device = device)
+
+                    diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
+                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+
+                    r = diayn_intrinsic
+                    self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()            
 
             r = torch.clamp(r, -1, 1)
                 
@@ -553,7 +556,7 @@ class PuffeRL:
                 rows = self.ep_indices[finished_ids]
                 l = self.ep_lengths[finished_ids]
 
-                
+                self.observations[rows, l] = env_start_obs[finished_ids]
                 self.actions[rows, l] = env_micro_action[finished_ids].long()
                 self.values[rows, l] = env_value[finished_ids]
                 self.logprobs[rows, l] = env_logprob[finished_ids]
