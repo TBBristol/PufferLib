@@ -572,7 +572,7 @@ class PuffeRL:
                 l = self.ep_lengths[finished_ids]
 
                 self.observations[rows, l] = env_start_obs[finished_ids]
-                self.actions[rows, l] = env_micro_action[finished_ids].long()
+                self.actions[rows, l] = env_micro_action[finished_ids].to(self.actions.dtype)
                 self.values[rows, l] = env_value[finished_ids]
                 self.logprobs[rows, l] = env_logprob[finished_ids]
                 self.rewards[rows, l] = env_r_sum[finished_ids]
