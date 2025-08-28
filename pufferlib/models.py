@@ -80,7 +80,7 @@ class Default(nn.Module):
 
         self.discriminator = nn.Sequential( #############
             nn.Flatten(start_dim=1, end_dim=-1),
-            nn.Linear(num_obs, hidden_size),            
+            nn.Linear(num_obs*2, hidden_size),            
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),

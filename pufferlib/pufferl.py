@@ -105,6 +105,11 @@ class PuffeRL:
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
         self.skill_choices = torch.zeros(segments, horizon, dtype=torch.long, device=device)#for second phase
+        self.obs_n = torch.zeros(segments, horizon, *obs_space.shape,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            pin_memory=device == 'cuda' and config['cpu_offload'],
+            device='cpu' if config['cpu_offload'] else device)
+
 
 
 #DIAYN SETUP
@@ -276,6 +281,10 @@ class PuffeRL:
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
         self.skill_choices = torch.zeros(segments, horizon, dtype=torch.long, device=device)#for second phase
+        self.obs_n = torch.zeros(segments, horizon, *obs_space.shape,
+                dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+                pin_memory=device == 'cuda' and config['cpu_offload'],
+                device='cpu' if config['cpu_offload'] else device)
 
         # Torch compile
         self.uncompiled_policy = policy
@@ -507,23 +516,7 @@ class PuffeRL:
 
             #Macro selection FINISHED here
 
-            #DIAYN overwrite Reward
-            if self.diayn_training:
-                with torch.no_grad():
-                    diayn_logits = self.policy.policy.discriminator(o_device)
-                    diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
-                    
-                    skills_for_envs = self.skills[ids]
-                    diayn_logq = diayn_logprob.gather(1, skills_for_envs.unsqueeze(1)).squeeze(1)
-
-                    k = torch.tensor(self.num_skills, device = device)
-
-                    diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
-                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #div normalises
-
-                    r = diayn_intrinsic
-                    self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()            
-
+             
             #CLAAAAAMP
             r = torch.clamp(r, -1, 1)
             
@@ -577,9 +570,34 @@ class PuffeRL:
                 self.logprobs[rows, l] = env_logprob[finished_ids]
                 self.rewards[rows, l] = env_r_sum[finished_ids]
                 self.terminals[rows, l] = env_dones[finished_ids].to(torch.float32)
+                self.obs_n[rows, l] = env_finish_obs[finished_ids]
 
                 if not self.diayn_training:
                     self.skill_choices[rows, l] = env_skill_choices[finished_ids].to(self.skill_choices.dtype)
+                
+                #calc and overwrite with DIAYN rewards using discrim
+                if self.diayn_training:
+                    with torch.no_grad():
+                        diayn_obs = torch.cat((env_start_obs[finished_ids], env_finish_obs[finished_ids]), dim=-1)
+                        diayn_logits = self.policy.policy.discriminator(diayn_obs)
+                        diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
+                        
+                        skills_for_envs = self.skills[finished_ids]
+                        diayn_logq = diayn_logprob.gather(1, skills_for_envs.unsqueeze(1)).squeeze(1)
+
+                        k = torch.tensor(self.num_skills, device = device)
+
+                        diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
+                        diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #div normalises
+
+                        r = diayn_intrinsic
+                        self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()
+                        
+                        r = torch.clamp(r, -1, 1)
+                        self.rewards[rows, l] = r
+
+
+
 
         #TODO HERE______ 
                 # Note: We are not yet handling masks in this version
@@ -685,6 +703,7 @@ class PuffeRL:
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
             mb_skills_seg = self.skills[idx]
+            mb_finish_obs = self.obs_n[idx]
             profile('train_forward', epoch)
             if not self.diayn_training:
                 mb_skill_choices = self.skill_choices[idx]
@@ -760,10 +779,10 @@ class PuffeRL:
             
             if self.diayn_training:
                 #diaynstuff ###########
-                obs_for_disc = mb_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape)
+                obs_for_disc = torch.cat((mb_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape),mb_finish_obs.contiguous().view(-1, *self.vecenv.single_observation_space.shape)), dim = -1)
                 diayn_logits = self.policy.policy.discriminator(obs_for_disc)
                 diayn_loss = torch.nn.functional.cross_entropy(diayn_logits, mb_skills.long())
-                diayn_loss.backward()
+                #diayn_loss.backward()
                   
             # Losses
             pg_loss1 = -adv * ratio
@@ -777,8 +796,10 @@ class PuffeRL:
             v_loss = 0.5*torch.max(v_loss_unclipped, v_loss_clipped).mean()
 
             entropy_loss = entropy.mean()
-
+            
             loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+            if self.diayn_training:
+                loss = loss + config['diayn_loss_coef']*diayn_loss
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -818,10 +839,6 @@ class PuffeRL:
         profile.end()
         logs = None
         self.epoch += 1
-
-
-
-
 
 
 ############################
