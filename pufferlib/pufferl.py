@@ -372,7 +372,7 @@ class PuffeRL:
         env_value = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
         env_logprob = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
         env_entropy = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
-        env_skill_choices = torch.zeros(self.total_agents, dtype=torch.float32, device=device)
+        env_skill_choices = torch.zeros(self.total_agents, dtype=torch.long, device=device)
         
         if config['use_rnn']:
             self.lstm_h.zero_()
@@ -394,9 +394,8 @@ class PuffeRL:
 
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
-
             ids = torch.tensor(env_id, device=device, dtype=torch.long)
-            need_action = ~env_active[ids] #mask of envs that need action
+            need_action = ~env_active[ids] #envs running an action for steps are "active"
     
 
             profile('eval_misc', epoch)
@@ -406,46 +405,78 @@ class PuffeRL:
 
             profile('eval_copy', epoch)
             o = torch.as_tensor(o)
-            o_device = o.to(device)#, non_blocking=True)
-            r = torch.as_tensor(r).to(device)#, non_blocking=True)
-            d = torch.as_tensor(d).to(device)#, no:n_blocking=True)
+            o_device = o.to(device)
+            r = torch.as_tensor(r).to(device)
+            d = torch.as_tensor(d).to(device)
             profile('eval_forward', epoch)
             
-            if need_action.any(): #first time or envs that finshed micro steps
+            if need_action.any(): #Thru polices for action selection
                 
                 need_action_set = need_action.nonzero().squeeze(1)  #indices of nonzero ie Trues
-                need_action_ids = ids[need_action_set] #absoluite ids of envs that need action
+                need_action_ids = ids[need_action_set] #absolute ids of envs that need action
                 o_need_act = o_device[need_action_set] 
                 
+                
+
+                #skill training takes in skill+obs and outputs action then
+                #later in code discriminator takes in obs and outputs skill which informs reward based on perf
+                #at guessing the skill
+
+                #Paths references policy input/output where 'skill' input is skill concat obs
+
 
                 if self.diayn_training:
-                    skill = self.ohe_skills_tensor[self.skills[need_action_ids]] 
+                    skill = self.ohe_skills_tensor[self.skills[need_action_ids]]
+                    with torch.no_grad(), self.amp_context:
+                        state = dict( 
+                            reward=r[need_action_set],
+                            done=d[need_action_set],
+                            env_id=ids[need_action_set],
+                            mask=mask[need_action_set.cpu().numpy()],
+                            path = None, #for polices to ensure takes right encoder/decoder, clunky but works for now
+                            skill=skill,
+                        )
+
+                        if config['use_rnn']:
+                             state['lstm_h'] = torch.index_select(self.lstm_h, 0, need_action_ids) #index_select gives _new_ tensor
+                             state['lstm_c'] = torch.index_select(self.lstm_c, 0, need_action_ids)
+
+                        #skill/action
+                        state['path'] = 'skill/action'
+                        logits, value = self.policy.forward_eval(o_need_act, state)
+                        action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
+                        #Copy back lstm states to buffer tensors
+                        if config['use_rnn']:
+                                self.lstm_h.index_copy_(0, need_action_ids, state['lstm_h'])
+                                self.lstm_c.index_copy_(0, need_action_ids, state['lstm_c'])
+
+                #Once skills are known we choose a skill from obs and then use previous skill_trained policy
+                #to give action from skill and obs 
                 else: 
                     skill = None
 
-                with torch.no_grad(), self.amp_context:
-                    state = dict( 
-                        reward=r[need_action_set],
-                        done=d[need_action_set],
-                        env_id=ids[need_action_set],
-                        mask=mask[need_action_set.cpu().numpy()],
-                        path = None, #for polices to ensure takes right encoder/decoder
-                        skill=skill, ######################## diayn stuff
-                    )
+                    with torch.no_grad(), self.amp_context:
+                        state = dict( 
+                            reward=r[need_action_set],
+                            done=d[need_action_set],
+                            env_id=ids[need_action_set],
+                            mask=mask[need_action_set.cpu().numpy()],
+                            path = None, #for polices to ensure takes right encoder/decoder
+                            skill=skill, ######################## diayn stuff
+                        )
 
-                    if config['use_rnn']:
-                         state['lstm_h'] = torch.index_select(self.lstm_h, 0, need_action_ids) #index_select gives new tensor
-                         state['lstm_c'] = torch.index_select(self.lstm_c, 0, need_action_ids)
+                        if config['use_rnn']:
+                             state['lstm_h'] = torch.index_select(self.lstm_h, 0, need_action_ids) #index_select gives new tensor
+                             state['lstm_c'] = torch.index_select(self.lstm_c, 0, need_action_ids)
 
+                             diayn_state = dict()
+                             diayn_state['lstm_h'] = torch.index_select(self.diayn_lstm_h, 0, need_action_ids)   
+                             diayn_state['lstm_c'] = torch.index_select(self.diayn_lstm_c, 0, need_action_ids)
+                            
 
-                    if not self.diayn_training:
-
-                        diayn_state = dict()
-                        diayn_state['lstm_h'] = torch.index_select(self.diayn_lstm_h, 0, need_action_ids)   
-                        diayn_state['lstm_c'] = torch.index_select(self.diayn_lstm_c, 0, need_action_ids)
-                        
-
-                        #WE WANT VALUE AND LOGPROB FROM POLICY BUT ACTION FROM DIAYN POLICY NAME ACCORDINGLY
+                        #For training we want actions from skill_trained policy but 
+                        #the value and logprob from policy that chooses a skill as this is what we are training
 
                         #obs/skill
                         state['path'] = 'obs/skill'
@@ -454,35 +485,16 @@ class PuffeRL:
                         
                         diayn_state['skill'] = self.ohe_skills_tensor[skill_choices] #TODO: check me
 
-                        #skill/action
-                        diayn_state['path'] = 'skill/action'
-                        diayn_logits, _ = self.diayn_policy.forward_eval(o_need_act, diayn_state)
-                        action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
-
-                    if self.diayn_training:
-                        #skill/action
-                        state['path'] = 'skill/action'
-                        logits, value = self.policy.forward_eval(o_need_act, state)
-                        action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-
-
-                with torch.no_grad():
-                  
-
-                    if config['use_rnn']:
-                        self.lstm_h.index_copy_(0, need_action_ids, state['lstm_h'])
-                        self.lstm_c.index_copy_(0, need_action_ids, state['lstm_c'])
-
-
-                        if not self.diayn_training:                        
-                            self.diayn_lstm_h.index_copy_(0, need_action_ids, diayn_state['lstm_h'])
-                            self.diayn_lstm_c.index_copy_(0, need_action_ids, diayn_state['lstm_c'])
-                
-
-                if isinstance(logits, torch.distributions.Normal):
-                            action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
-
-                env_micro_action[need_action_ids] = action.to(env_micro_action.dtype)
+                        #copy back lstm states to buffer tensors
+                        if config['use_rnn']:
+                            self.lstm_h.index_copy_(0, need_action_ids, state['lstm_h'])
+                            self.lstm_c.index_copy_(0, need_action_ids, state['lstm_c'])
+                         
+                #Reset buffers for macro step
+                if self.diayn_training:    #actions for diayn training otherwise skills
+                    env_micro_action[need_action_ids] = action.to(env_micro_action.dtype)
+                else:
+                    env_skill_choices[need_action_ids] = skill_choices.squeeze().to(torch.long)
                 env_k_left[need_action_ids] = self.k
                 env_r_sum[need_action_ids] = 0.0
                 env_micro_steps[need_action_ids]= 0
@@ -492,12 +504,12 @@ class PuffeRL:
                 env_active[need_action_ids] = True
                 env_value[need_action_ids] = value.squeeze()
                 env_logprob[need_action_ids] = logprob
-                if not self.diayn_training:
-                    env_skill_choices[need_action_ids] = skill_choices.squeeze().to(torch.float32)
 
+            #Macro selection FINISHED here
 
-            with torch.no_grad():
-                if self.diayn_training:
+            #DIAYN overwrite Reward
+            if self.diayn_training:
+                with torch.no_grad():
                     diayn_logits = self.policy.policy.discriminator(o_device)
                     diayn_logprob = torch.log_softmax(diayn_logits, dim=1)
                     
@@ -507,14 +519,17 @@ class PuffeRL:
                     k = torch.tensor(self.num_skills, device = device)
 
                     diayn_logp = -torch.log(k)  #\log p(z) = \log\left(\frac{1}{K}\right) = -\log(K) (batch)
-                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #the div is to normalise not tried before shold work to be within clamp?
+                    diayn_intrinsic = (diayn_logq - diayn_logp) / torch.log(k) #div normalises
 
                     r = diayn_intrinsic
                     self.stats['diayn_intrinsic'] = diayn_intrinsic.mean().item()            
 
+            #CLAAAAAMP
             r = torch.clamp(r, -1, 1)
-                
-            active_envs = env_active[env_id]
+            
+
+            #Write data to envs buffers that are stepping with const. action
+            active_envs = env_active[ids]
             if active_envs.any():
                 rows = ids[active_envs]
                 env_r_sum[rows] += r[active_envs]
@@ -525,7 +540,7 @@ class PuffeRL:
                 env_finish_obs[rows] = o_device[active_envs]
 
 
-            #Termination for micro steps actions
+            #Termination for constant actions/skils
 
             stop_action = torch.zeros_like(active_envs, dtype=bool)
 
@@ -533,7 +548,6 @@ class PuffeRL:
             """if active_envs.any(): 
                 stop_action[active_envs] = stop_fn(active_envs) #TODO
                 """
-
             finished_mask = torch.zeros_like(ids, dtype = bool)
             if active_envs.any():
                 rows = ids[active_envs]
@@ -545,7 +559,8 @@ class PuffeRL:
 
             profile('eval_copy', epoch)
 
-                
+            
+            #Fill data buffers once envs have finished stepping the action
             if full_mask.any():
                 finished_mask = finished_mask & ~full_mask[ids] #dont fill full rows
             
@@ -575,9 +590,27 @@ class PuffeRL:
                     num_full = full_mask.sum()
                     self.full_rows = num_full
 
-                        
 
-            actions_to_send = env_micro_action[env_id]
+
+            #calcuate actions from macro_step skills and obs
+
+            if not self.diayn_training:
+                diayn_state = dict()
+                diayn_state['lstm_h'] = torch.index_select(self.diayn_lstm_h, 0, ids)   
+                diayn_state['lstm_c'] = torch.index_select(self.diayn_lstm_c, 0, ids)
+                diayn_state['skill'] = self.ohe_skills_tensor[env_skill_choices[ids]]
+                with torch.no_grad():
+                    #skill/action
+                    diayn_state['path'] = 'skill/action'
+                    diayn_logits, _ = self.diayn_policy.forward_eval(o_device, diayn_state)
+                    action, diyan_logprob, _ = pufferlib.pytorch.sample_logits(diayn_logits)
+                    if config['use_rnn']:
+                        self.diayn_lstm_h.index_copy_(0, ids, diayn_state['lstm_h'])
+                        self.diayn_lstm_c.index_copy_(0, ids, diayn_state['lstm_c'])
+
+                actions_to_send = action
+            else:
+                actions_to_send = env_micro_action[env_id]
 
             action = actions_to_send.cpu().numpy()
             if isinstance(logits, torch.distributions.Normal):
