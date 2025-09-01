@@ -276,13 +276,6 @@ setup(
     },
     include_package_data=True,
     install_requires=install_requires,
-    extras_require={
-        #'docs': docs,
-        'ray': ray,
-        'cleanrl': cleanrl,
-        #'common': common,
-       # **environments,
-    },
     ext_modules = c_extensions + torch_extensions,
     cmdclass={
         "build_ext": BuildExt,
