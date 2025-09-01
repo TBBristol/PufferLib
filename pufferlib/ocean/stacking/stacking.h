@@ -252,7 +252,7 @@ void c_reset(ContainerStacking *env) {
     if (env->seed != 0) {
             env->rng_state = (unsigned int) env->seed;
         } else {
-            env->rng_state = (unsigned int)(time(NULL) ^ (uintptr_t)env);
+            env->rng_state = (unsigned int)(time(NULL) ^ (size_t)env);
         }
       
     initialise_stacks(env);
