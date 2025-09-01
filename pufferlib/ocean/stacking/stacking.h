@@ -51,6 +51,7 @@ typedef struct {
     float num_invalids;
     float reward_max_breach;
     bool reset_max_breach;
+    unsigned int rng_state;   // per-env RNG state
 }ContainerStacking;
 
 void add_log(ContainerStacking* env) {
@@ -69,7 +70,7 @@ void add_log(ContainerStacking* env) {
  * Helpers
  * -----------------------------------------------------------*/
 
- void sample_unique_integers(int *out, int n) {
+ void sample_unique_integers(ContainerStacking *env, int *out, int n) {
     // Fill with 0..n-1
     for (int i = 0; i < n; i++) {
         out[i] = i;
@@ -77,7 +78,7 @@ void add_log(ContainerStacking* env) {
 
     // Fisher-Yates shuffle
     for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
+        int j = rand_r(&env->rng_state) % (i + 1);
         int tmp = out[i];
         out[i] = out[j];
         out[j] = tmp;
@@ -107,7 +108,7 @@ void add_log(ContainerStacking* env) {
     }
     env->container_leaving_priorities = malloc(sizeof(int) * env->num_containers);
 
-    sample_unique_integers(env->container_leaving_priorities, env->num_containers);
+    sample_unique_integers(env, env->container_leaving_priorities, env->num_containers);
     }
  
 
@@ -202,11 +203,11 @@ int top_of_stack_priority(ContainerStacking *env,int stack){
     if (stack_empty(env,stack)){
         return 0; //effectively lowest priority so we want to stack here
     }
-    return STACK(env, stack, find_next_height(env, stack) -1);
+    return STACK(env, stack, find_height(env, stack) -1);
 }
 
-float linear_norm(int x, int xmax,int  xmin) {
-
+float linear_norm(int x, int xmin,int  xmax) {
+    if (xmax == xmin) return 0.0f;
     return (float) ((float) (x - xmin)/(float) (xmax-xmin));
 }
 
@@ -236,7 +237,7 @@ float* generate_obs(ContainerStacking *env){
         OBS(env, s, 2) = linear_norm(top_prior, 0, env->num_containers-1);
         OBS(env, s, 3) = linear_norm(lowest_remaining, 0, env->num_containers-1);
         OBS(env, s, 4) = linear_norm(num_less_than_top, 0, env->num_containers-1);
-        OBS(env, s, 5) = linear_norm(stack_unsorted, env->max_height-1, 0);
+        OBS(env, s, 5) = linear_norm(stack_unsorted, 0,env->max_height-1);
     }
     return env->observations;
 }
@@ -247,13 +248,19 @@ float* generate_obs(ContainerStacking *env){
 void c_reset(ContainerStacking *env) {
 
     //srand(((uintptr_t)env) ^ time(NULL)); //different seed per env and reset
-  
+    //
+    if (env->seed != 0) {
+            env->rng_state = (unsigned int) env->seed;
+        } else {
+            env->rng_state = (unsigned int)(time(NULL) ^ (uintptr_t)env);
+        }
+      
     initialise_stacks(env);
 
     generate_container_priorities(env); //array each element int priority lowest num highest priority 
 
     //clear obs
-    memset(env->observations, 0.0f, sizeof(float) * env->num_stacks * 6);
+    memset(env->observations, 0, sizeof(float) * env->num_stacks * 6);
 
     env->tick = 0;
     env->unsorted = 0.0f;
@@ -324,6 +331,8 @@ void c_step(ContainerStacking *env) {
         //if (env->reset_max_breach) {
         //c_reset(env);
     //}
+        generate_obs(env);
+
         return;
     }
 

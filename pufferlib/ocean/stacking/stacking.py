@@ -82,8 +82,6 @@ class ContainerStacking(pufferlib.PufferEnv):
         info = []
         if self.tick % self.log_interval == 0:
             info.append(binding.vec_log(self.c_envs))
-        print(self.rewards) 
-        print(len(self.rewards))
         return (self.observations, self.rewards,
             self.terminals, self.truncations, info)
 

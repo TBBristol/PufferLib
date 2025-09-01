@@ -277,7 +277,7 @@ setup(
     include_package_data=True,
     install_requires=install_requires,
     extras_require={
-        'docs': docs,
+        #'docs': docs,
         'ray': ray,
         'cleanrl': cleanrl,
         #'common': common,
