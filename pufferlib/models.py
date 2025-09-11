@@ -21,9 +21,10 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128):
+    def __init__(self, env, hidden_size=128, skill_dim= 0):
         super().__init__()
         self.hidden_size = hidden_size
+        self.skill_dim = hidden_size # Skill embedding dimension needs to be same as obs embed dim in METRA
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
@@ -43,28 +44,35 @@ class Default(nn.Module):
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
             )
-            
+
+        self.combined_dim = self.skill_dim + self.hidden_size
+        
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)
             num_atns = sum(self.action_nvec)
             self.decoder = pufferlib.pytorch.layer_init(
-                    nn.Linear(hidden_size, num_atns), std=0.01)
+                    nn.Linear(self.combined_dim, num_atns), std=0.01)
         elif not self.is_continuous:
             num_atns = env.single_action_space.n
             self.decoder = pufferlib.pytorch.layer_init(
-                nn.Linear(hidden_size, num_atns), std=0.01)
+                nn.Linear(self.combined_dim, num_atns), std=0.01)
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
-                nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
+                nn.Linear(self.combined_dim, env.single_action_space.shape[0]), std=0.01)
             self.decoder_logstd = nn.Parameter(torch.zeros(
                 1, env.single_action_space.shape[0]))
 
         self.value = pufferlib.pytorch.layer_init(
-            nn.Linear(hidden_size, 1), std=1)
+            nn.Linear(self.combined_dim, 1), std=1)
 
     def forward_eval(self, observations, state=None):
-        hidden = self.encode_observations(observations, state=state)
-        logits, values = self.decode_actions(hidden)
+        phi = self.encode_observations(observations, state=state)
+        
+        if state is not None and 'skill' in state and state['skill'] is not None:
+            phi = torch.cat([state['skill'], phi], dim=1)
+
+
+        logits, values = self.decode_actions(phi)
         return logits, values
 
     def forward(self, observations, state=None):
@@ -80,6 +88,7 @@ class Default(nn.Module):
         else: 
             observations = observations.view(batch_size, -1)
         return self.encoder(observations.float())
+
 
     def decode_actions(self, hidden):
         '''Decodes a batch of hidden states into (multi)discrete actions.

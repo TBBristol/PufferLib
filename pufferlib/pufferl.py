@@ -200,6 +200,28 @@ class PuffeRL:
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
+        #Metra skills - must be equal dim to state embedding
+        d = self.policy.hidden_size
+        k = self.config['metra_num_skills']
+        self.metra_skills = torch.eye(k,d, device = device) 
+        #Metra skills have zero mean and unit variance which majes WAssertein cancel nicely
+        self.metra_skills = self.metra_skills - self.metra_skills.mean(0, keepdim=True)
+        self.metra_skills = self.metra_skills / (self.metra_skills.std(dim=1, keepdim=True) + 1e-10)
+
+        #for 4 skills 4 dim this looks like each row is then a discrete skill embedded
+        #But dim is actually hidden _size as needs to be same as state embed
+        """tensor([[ 1.5000, -0.5000, -0.5000, -0.5000],
+        [-0.5000,  1.5000, -0.5000, -0.5000],
+        [-0.5000, -0.5000,  1.5000, -0.5000],
+        [-0.5000, -0.5000, -0.5000,  1.5000]])"""
+        
+        self.skill_ids = torch.randint(0, k, (total_agents,), device=device)
+        #to use like this z = self.metra_skills[self.skill_ids]
+        self.skill_ids_buf = torch.zeros(segments,horizon, device=device, dtype=torch.int64)
+
+
+
+
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -241,6 +263,8 @@ class PuffeRL:
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            z = self.metra_skills[self.skill_ids[env_id]].to(device) 
+            
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
@@ -249,14 +273,17 @@ class PuffeRL:
                     done=d,
                     env_id=env_id,
                     mask=mask,
+                    skill = z
                 )
 
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
-
+                    
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+
+
                 r = torch.clamp(r, -1, 1)
 
             profile('eval_copy', epoch)
@@ -279,6 +306,7 @@ class PuffeRL:
                 self.rewards[batch_rows, l] = r
                 self.terminals[batch_rows, l] = d.float()
                 self.values[batch_rows, l] = value.flatten()
+                self.skill_ids_buf[batch_rows,l] = self.skill_ids[env_id]
 
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
@@ -348,17 +376,38 @@ class PuffeRL:
             mb_obs = self.observations[idx]
             mb_actions = self.actions[idx]
             mb_logprobs = self.logprobs[idx]
-            mb_rewards = self.rewards[idx]
+            mb_rewards = self.rewards[idx] #samples, horizon
             mb_terminals = self.terminals[idx]
             mb_truncations = self.truncations[idx]
             mb_ratio = self.ratio[idx]
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-
+            mb_instrinsic_r = torch.zeros_like(mb_rewards)
+            mb_skill_ids = self.skill_ids_buf[idx]
+            mb_z = self.metra_skills[mb_skill_ids].to(device)             
+            breakpoint()
             profile('train_forward', epoch)
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+
+
+
+            with torch.no_grad():
+                emb = self.policy.policy.encode_observations(mb_obs) #segments, segment_len, dim
+                delta_phi = emb[1:,:,:] - emb[:-1,:,:]
+                z = mb_z 
+                r_intrinsic = (delta_phi *z).sum(dim = 1) #dot prod by row
+                mb_instrinsic_r[:,1:] = r_intrinsic
+
+
+
+                
+
+
+                                        #z = self.metra_skills[self.skill_ids[batch_rows]].to(device)
+
+
 
             state = dict(
                 action=mb_actions,
