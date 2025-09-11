@@ -21,7 +21,7 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128, skill_dim= 0):
+    def __init__(self, env, hidden_size=128):
         super().__init__()
         self.hidden_size = hidden_size
         self.skill_dim = hidden_size # Skill embedding dimension needs to be same as obs embed dim in METRA
@@ -43,37 +43,31 @@ class Default(nn.Module):
             self.encoder = torch.nn.Sequential(
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
-            )
+                )
 
-        self.combined_dim = self.skill_dim + self.hidden_size
-        
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)
             num_atns = sum(self.action_nvec)
             self.decoder = pufferlib.pytorch.layer_init(
-                    nn.Linear(self.combined_dim, num_atns), std=0.01)
+                    nn.Linear(self.hidden_size, num_atns), std=0.01)
         elif not self.is_continuous:
             num_atns = env.single_action_space.n
             self.decoder = pufferlib.pytorch.layer_init(
-                nn.Linear(self.combined_dim, num_atns), std=0.01)
+                nn.Linear(self.hidden_size, num_atns), std=0.01)
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
-                nn.Linear(self.combined_dim, env.single_action_space.shape[0]), std=0.01)
+                nn.Linear(self.hidden_size, env.single_action_space.shape[0]), std=0.01)
             self.decoder_logstd = nn.Parameter(torch.zeros(
                 1, env.single_action_space.shape[0]))
 
         self.value = pufferlib.pytorch.layer_init(
-            nn.Linear(self.combined_dim, 1), std=1)
+            nn.Linear(self.hidden_size, 1), std=1)
 
     def forward_eval(self, observations, state=None):
-        phi = self.encode_observations(observations, state=state)
-        
-        if state is not None and 'skill' in state and state['skill'] is not None:
-            phi = torch.cat([state['skill'], phi], dim=1)
-
-
-        logits, values = self.decode_actions(phi)
+        hidden = self.encode_observations(observations, state=state)
+        logits, values = self.decode_actions(hidden)
         return logits, values
+
 
     def forward(self, observations, state=None):
         return self.forward_eval(observations, state)
@@ -142,6 +136,7 @@ class LSTMWrapper(nn.Module):
     def forward_eval(self, observations, state):
         '''Forward function for inference. 3x faster than using LSTM directly'''
         hidden = self.policy.encode_observations(observations, state=state)
+
         h = state['lstm_h']
         c = state['lstm_c']
 
