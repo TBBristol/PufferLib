@@ -426,9 +426,8 @@ class PuffeRL:
             adv = compute_puff_advantage(mb_values, mb_intrinsic_r, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
-            adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
-
+            mb_returns = adv + mb_values
             # Losses
             pg_loss1 = -adv * ratio
             pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
@@ -457,7 +456,7 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            logs['mb_intrinsic_r'] += mb_intrinsic_r.mean().item() / self.total_minibatches
+            losses['mb_intrinsic_r'] += mb_intrinsic_r.mean().item() / self.total_minibatches
 
 
             # Learn on accumulated minibatches
