@@ -219,7 +219,7 @@ class PuffeRL:
         #to use like this z = self.metra_skills[self.skill_ids]
         self.skill_ids_buf = torch.zeros(segments,horizon, device=device, dtype=torch.int64)
 
-
+        self.intrinsic_r = torch.zeros_like(self.rewards)
 
 
     @property
@@ -315,6 +315,23 @@ class PuffeRL:
                     self.ep_lengths[env_id] = 0
                     self.free_idx += num_full
                     self.full_rows += num_full
+                
+                if l>0:
+                    with torch.no_grad():       
+                        emb = self.policy.policy.encoder(self.observations[batch_rows,l-1:l+1])
+                        delta_phi = emb[:,1, :] - emb[:, 0, :]
+                        z = self.skill_ids_buf[batch_rows, l-1]
+                        z = self.metra_skills[z]
+                        r_intr = (delta_phi *z).sum(dim = 1)
+                        r_intr = torch.clamp(r_intr, -1, 1)
+                        self.rewards[batch_rows,l] = r_intr
+                        self.stats['intr_r'] = r_intr
+
+
+                    
+
+
+
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
@@ -388,8 +405,7 @@ class PuffeRL:
             profile('train_forward', epoch)
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-
-
+            """
             with torch.no_grad():
                 B,S,D = mb_obs.shape
                 mb_obs_flat = mb_obs.reshape(B*S,D)
@@ -398,7 +414,7 @@ class PuffeRL:
                 delta_phi = emb[:,1:,:] - emb[:,:-1,:]
                 z = mb_z[:,:-1,:] 
                 r_intrinsic = (delta_phi *z).sum(dim = 2) #dot prod by row
-                mb_intrinsic_r[:,1:] = r_intrinsic
+                mb_intrinsic_r[:,1:] = r_intrinsic"""
 
             state = dict(
                 action=mb_actions,
@@ -423,7 +439,7 @@ class PuffeRL:
                 clipfrac = ((ratio - 1.0).abs() > config['clip_coef']).float().mean()
 
             adv = advantages[idx]
-            adv = compute_puff_advantage(mb_values, mb_intrinsic_r, mb_terminals,
+            adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -456,7 +472,7 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            losses['mb_intrinsic_r'] += mb_intrinsic_r.mean().item() / self.total_minibatches
+            
 
 
             # Learn on accumulated minibatches
