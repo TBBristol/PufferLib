@@ -279,7 +279,6 @@ class PuffeRL:
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
-                    
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
@@ -383,37 +382,31 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
-            mb_instrinsic_r = torch.zeros_like(mb_rewards)
+            mb_intrinsic_r = torch.zeros_like(mb_rewards)
             mb_skill_ids = self.skill_ids_buf[idx]
             mb_z = self.metra_skills[mb_skill_ids].to(device)             
-            breakpoint()
             profile('train_forward', epoch)
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
 
-
             with torch.no_grad():
-                emb = self.policy.policy.encode_observations(mb_obs) #segments, segment_len, dim
-                delta_phi = emb[1:,:,:] - emb[:-1,:,:]
-                z = mb_z 
-                r_intrinsic = (delta_phi *z).sum(dim = 1) #dot prod by row
-                mb_instrinsic_r[:,1:] = r_intrinsic
-
-
-
-                
-
-
-                                        #z = self.metra_skills[self.skill_ids[batch_rows]].to(device)
-
-
+                B,S,D = mb_obs.shape
+                mb_obs_flat = mb_obs.reshape(B*S,D)
+                emb = self.policy.policy.encode_observations(mb_obs_flat) #segments, segment_len, dim
+                emb = emb.reshape(B,S,-1)
+                delta_phi = emb[:,1:,:] - emb[:,:-1,:]
+                z = mb_z[:,:-1,:] 
+                r_intrinsic = (delta_phi *z).sum(dim = 2) #dot prod by row
+                mb_intrinsic_r[:,1:] = r_intrinsic
 
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
+                skill = mb_z.reshape(-1, mb_z.shape[-1])
             )
+            
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -430,7 +423,7 @@ class PuffeRL:
                 clipfrac = ((ratio - 1.0).abs() > config['clip_coef']).float().mean()
 
             adv = advantages[idx]
-            adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
+            adv = compute_puff_advantage(mb_values, mb_intrinsic_r, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
             adv = mb_advantages
@@ -464,6 +457,8 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
+            logs['mb_intrinsic_r'] += mb_intrinsic_r.mean().item() / self.total_minibatches
+
 
             # Learn on accumulated minibatches
             profile('learn', epoch)
