@@ -21,10 +21,10 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128):
+    def __init__(self, env, hidden_size=128, phi_dim = 4):
         super().__init__()
         self.hidden_size = hidden_size
-        self.skill_dim = hidden_size # Skill embedding dimension needs to be same as obs embed dim in METRA
+        self.skill_dim = phi_dim # Skill embedding dimension needs to be same as obs embed dim in METRA
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
@@ -44,6 +44,9 @@ class Default(nn.Module):
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
                 )
+        self.phi_dim = phi_dim
+        self.phi_proj = torch.nn.Linear(hidden_size, self.phi_dim) #small phi head
+
 
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)
@@ -64,7 +67,7 @@ class Default(nn.Module):
             nn.Linear(self.hidden_size + self.skill_dim, 1), std=1)
 
     def forward_eval(self, observations, state=None):
-        hidden = self.encode_observations(observations, state=state)
+        hidden,phi = self.encode_observations(observations, state=state)
         logits, values = self.decode_actions(hidden, state)
         return logits, values
 
@@ -81,8 +84,9 @@ class Default(nn.Module):
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
         else: 
             observations = observations.view(batch_size, -1)
-        return self.encoder(observations.float())
-
+        hidden = self.encoder(observations.float())
+        phi = self.phi_proj(hidden)   # shape (B, 4)
+        return hidden, phi
 
     def decode_actions(self, hidden, state):
         '''Decodes a batch of hidden states into (multi)discrete actions.
@@ -137,7 +141,7 @@ class LSTMWrapper(nn.Module):
 
     def forward_eval(self, observations, state):
         '''Forward function for inference. 3x faster than using LSTM directly'''
-        hidden = self.policy.encode_observations(observations, state=state)
+        hidden,phi = self.policy.encode_observations(observations, state=state)
 
         h = state['lstm_h']
         c = state['lstm_c']
@@ -183,7 +187,7 @@ class LSTMWrapper(nn.Module):
             lstm_state = None
 
         x = x.reshape(B*TT, *space_shape)
-        hidden = self.policy.encode_observations(x, state)
+        hidden, phi = self.policy.encode_observations(x, state)
         assert hidden.shape == (B*TT, self.input_size)
 
         hidden = hidden.reshape(B, TT, self.input_size)

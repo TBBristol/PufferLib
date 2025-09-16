@@ -200,9 +200,10 @@ class PuffeRL:
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
-        #Metra skills - must be equal dim to state embedding
-        d = self.policy.hidden_size
+        #Metra skills - must be equal dim to phi state embedding
+        d = self.policy.policy.phi_dim
         k = self.config['metra_num_skills']
+        
         self.metra_skills = torch.eye(k,d, device = device) 
         #Metra skills have zero mean and unit variance which majes WAssertein cancel nicely
         self.metra_skills = self.metra_skills - self.metra_skills.mean(0, keepdim=True)
@@ -220,6 +221,10 @@ class PuffeRL:
         self.skill_ids_buf = torch.zeros(segments,horizon, device=device, dtype=torch.int64)
 
         self.intrinsic_r = torch.zeros_like(self.rewards)
+        self.log_lambda = torch.nn.Parameter(torch.tensor(0.0, device=device))
+        self.opt_lambda = torch.optim.Adam([self.log_lambda], lr=self.config['learning_rate'])
+        self.epsilon = 1.0
+        self.opt_enc = torch.optim.Adam(self.policy.policy.phi_proj.parameters(), lr=self.config['learning_rate'])
 
 
     @property
@@ -315,23 +320,21 @@ class PuffeRL:
                     self.ep_lengths[env_id] = 0
                     self.free_idx += num_full
                     self.full_rows += num_full
-                
+                    
+                #Calc intrinsic reward and REPLACE actaul reward
                 if l>0:
                     with torch.no_grad():       
-                        emb = self.policy.policy.encoder(self.observations[batch_rows,l-1:l+1])
-                        delta_phi = emb[:,1, :] - emb[:, 0, :]
+                        B,S,O = self.observations[batch_rows,l-1:l+1].shape #batch,segment,obs
+                        flat_obs = self.observations[batch_rows,l-1:l+1].reshape(B*S,O)
+                        hidden,phi = self.policy.policy.encode_observations(flat_obs)
+                        phi = phi.reshape(B,S,-1)
+                        delta_phi = phi[:,1, :] - phi[:, 0, :]
                         z = self.skill_ids_buf[batch_rows, l-1]
                         z = self.metra_skills[z]
                         r_intr = (delta_phi *z).sum(dim = 1)
                         r_intr = torch.clamp(r_intr, -1, 1)
                         self.rewards[batch_rows,l] = r_intr
-                        self.stats['intr_r'] = r_intr
-
-
-                    
-
-
-
+                        self.stats['intr_r'] = r_intr.mean().item()
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
@@ -405,27 +408,51 @@ class PuffeRL:
             profile('train_forward', epoch)
             if not config['use_rnn']:
                 mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-            """
-            with torch.no_grad():
-                B,S,D = mb_obs.shape
-                mb_obs_flat = mb_obs.reshape(B*S,D)
-                emb = self.policy.policy.encode_observations(mb_obs_flat) #segments, segment_len, dim
-                emb = emb.reshape(B,S,-1)
-                delta_phi = emb[:,1:,:] - emb[:,:-1,:]
-                z = mb_z[:,:-1,:] 
-                r_intrinsic = (delta_phi *z).sum(dim = 2) #dot prod by row
-                mb_intrinsic_r[:,1:] = r_intrinsic"""
+           
 
+            #Calculate delta phi and violation constraint
+            B,S,D = mb_obs.shape
+            mb_obs_flat = mb_obs.reshape(B*S,D)
+            hidden,phi = self.policy.policy.encode_observations(mb_obs_flat) #segments, segment_len, dim
+            phi = phi.reshape(B,S,-1) #[segments, seglen, dims]
+            delta_phi = phi[:,1:,:] - phi[:,:-1,:] #[segments, seglen-1,dim] per step encoded space diff
+            violation = 1- delta_phi.pow(2).sum(dim = -1) # ||φ(s) - φ(s′)||² [segemnts, seglen-1]
+            violation = torch.clamp(violation, max = self.epsilon)
+            z = mb_z[:,:-1,:]
+                       
+            
             state = dict(
                 action=mb_actions,
                 lstm_h=None,
                 lstm_c=None,
                 skill = mb_z.reshape(-1, mb_z.shape[-1])
             )
-            
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+           
+            
+            #make lambda non neg for encoder loss part
+            #param is unconstrianed for optimisation but to use we do this
+            lambda_val = torch.exp(self.log_lambda)
+            
+
+            #encoder loss  # (||φ(s) - φ(s′)||²)^T z +  lambda . min (epsilon, 1- ||φ(s) - φ(s′)||²)
+            encoder_loss = -(delta_phi * z).sum(dim=-1).mean() + (lambda_val.detach() * violation).mean()
+            self.opt_enc.zero_grad()
+            encoder_loss.backward(retain_graph = True) #becuase ppo update follows
+            self.opt_enc.step()
+
+
+            #optimise lambda
+            lambda_loss = (self.log_lambda * violation.detach()).mean()
+            self.opt_lambda.zero_grad()
+            lambda_loss.backward()
+            self.opt_lambda.step()
+
+            # cut the graph so PPO won’t backprop again
+            delta_phi = delta_phi.detach()
+            z = z.detach()
 
             profile('train_misc', epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
@@ -472,7 +499,11 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            
+            losses['encoder loss'] += encoder_loss.item()/self.total_minibatches
+            losses['lambda loss'] += lambda_loss.item()/self.total_minibatches
+            self.stats['dot'] = (delta_phi * z).sum(dim=-1).mean()
+            self.stats['log_lambda'] = self.log_lambda.item()
+                   
 
 
             # Learn on accumulated minibatches
