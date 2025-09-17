@@ -284,6 +284,7 @@ class PuffeRL:
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
                     state['lstm_c'] = self.lstm_c[env_id.start]
+                
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
 
@@ -1031,6 +1032,10 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     return all_logs
 
 def eval(env_name, args=None, vecenv=None, policy=None):
+
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+    from sklearn.decomposition import PCA
     args = args or load_config(env_name)
     backend = args['vec']['backend']
     if backend != 'PufferEnv':
@@ -1053,7 +1058,21 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         )
 
     frames = []
+    d = policy.policy.phi_dim
+    k = 2 
+    
+    metra_skills = torch.eye(k,d, device = device) 
+    #Metra skills have zero mean and unit variance which majes WAssertein cancel nicely
+    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
+    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-10)
+    env_skill_ids = torch.randint(0, k, (vecenv.num_envs,), device=device)
+    trajectories = defaultdict(list)
+    steps = 0
     while True:
+        steps +=1
+        skill =  metra_skills[env_skill_ids] #must be batch shaped like num envs
+        state['skill'] = skill
+
         render = driver.render()
         if len(frames) < args['save_frames']:
             frames.append(render)
@@ -1069,22 +1088,66 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             #cv2.imshow('frame', render)
             #cv2.waitKey(1)
             #time.sleep(1/args['fps'])
-
+        
         with torch.no_grad():
             ob = torch.as_tensor(ob).to(device)
             logits, value = policy.forward_eval(ob, state)
             action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
             action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 
+            #collect trajs
+            hidden, phi = policy.policy.encode_observations(ob)
+            phi_np = phi.cpu().numpy()
+            for env_id in range(vecenv.num_envs):
+                trajectories[env_id].append(phi_np[env_id])
+
         if isinstance(logits, torch.distributions.Normal):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
-
-        ob = vecenv.step(action)[0]
+        ob, rewards, terminals, truncations, infos = vecenv.step(action)
 
         if len(frames) > 0 and len(frames) == args['save_frames']:
             import imageio
             imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
+        if steps >= 1000:
+            print("HERE")
+            vecenv.close()
+            break
+    for env_id in trajectories:
+        trajectories[env_id] = np.stack(trajectories[env_id], axis=0)
+
+       # close any cv2 or matplotlib windows too
+    try:
+        import cv2
+        cv2.destroyAllWindows()
+    except ImportError:
+        pass
+
+    plt.figure(figsize=(6, 6))
+
+    skills = {i: env_skill_ids[i].item() for i in range(vecenv.num_envs)}
+    for env_id, traj in trajectories.items():
+        if traj.shape[1] > 2:
+            traj_2d = PCA(n_components=2).fit_transform(traj)
+        else:
+            traj_2d = traj
+
+        color = None
+        label = f"env {env_id}"
+        if skills is not None:
+            color = plt.cm.tab10(skills[env_id] % 10)
+            label += f" skill {skills[env_id]}"
+
+        plt.plot(traj_2d[:, 0], traj_2d[:, 1], marker="o", markersize=2,
+                 alpha=0.7, color=color, label=label)
+
+    plt.xlabel("phi[0]")
+    plt.ylabel("phi[1]")
+    plt.title("Trajectories in φ-space")
+   # plt.legend()
+    #plt.show()
+    plt.savefig("phi_trajectories.png", dpi=300, bbox_inches="tight")
+    plt.close()
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)
