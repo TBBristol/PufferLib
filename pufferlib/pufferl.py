@@ -256,6 +256,7 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            breakpoint()
 
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
@@ -1031,6 +1032,66 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.logger.close(model_path)
     return all_logs
 
+def eval_skills(env_name, args=None, vecenv=None, policy=None):
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+    from sklearn.decomposition import PCA
+    args = args or load_config(env_name)
+    backend = args['vec']['backend']
+    if backend != 'PufferEnv':
+        backend = 'Serial'
+
+    args['vec'] = dict(backend=backend, num_envs=1)
+    vecenv = vecenv or load_env(env_name, args)
+
+    policy = policy or load_policy(args, vecenv, env_name)
+    ob, info = vecenv.reset()
+    driver = vecenv.driver_env
+    num_agents = vecenv.observation_space.shape[0]
+    device = args['train']['device']
+
+    state = {}
+    if args['train']['use_rnn']:
+        state = dict(
+            lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
+            lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
+        )
+
+    frames = []
+ 
+    while True:
+
+        render = driver.render()
+        if len(frames) < args['save_frames']:
+            frames.append(render)
+
+        # Screenshot Ocean envs with F12, gifs with control + F12
+        if driver.render_mode == 'ansi':
+            print('\033[0;0H' + render + '\n')
+            time.sleep(1/args['fps'])
+        elif driver.render_mode == 'rgb_array':
+            pass
+            #import cv2
+            #render = cv2.cvtColor(render, cv2.COLOR_RGB2BGR)
+            #cv2.imshow('frame', render)
+            #cv2.waitKey(1)
+            #time.sleep(1/args['fps'])
+        
+        with torch.no_grad():
+            ob = torch.as_tensor(ob).to(device)
+            logits, value = policy.forward_eval(ob, state)
+            action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+            action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+
+        if isinstance(logits, torch.distributions.Normal):
+            action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
+        ob = vecenv.step(action)[0]
+
+        if len(frames) > 0 and len(frames) == args['save_frames']:
+            import imageio
+            imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
+            frames.append('Done')
+     
 def eval(env_name, args=None, vecenv=None, policy=None):
 
     import matplotlib.pyplot as plt
@@ -1358,6 +1419,8 @@ def main():
         train(env_name=env_name)
     elif mode == 'eval':
         eval(env_name=env_name)
+    elif mode == 'eval_skills':
+        eval_skills(env_name=env_name)
     elif mode == 'sweep':
         sweep(env_name=env_name)
     elif mode == 'autotune':

@@ -50,6 +50,10 @@ class Grid(pufferlib.PufferEnv):
         pass
         #binding.vec_close(self.c_envs)
 
+    def get_positions(self):
+        return binding.my_vec_get(self.c_envs)
+   
+
 def test_performance(timeout=10, atn_cache=1024):
     env = CGrid(num_envs=1000)
     env.reset()
