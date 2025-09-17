@@ -256,7 +256,6 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            breakpoint()
 
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
@@ -1032,7 +1031,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.logger.close(model_path)
     return all_logs
 
-def eval_skills(env_name, args=None, vecenv=None, policy=None):
+def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=None):
     import matplotlib.pyplot as plt
     from collections import defaultdict
     from sklearn.decomposition import PCA
@@ -1050,6 +1049,15 @@ def eval_skills(env_name, args=None, vecenv=None, policy=None):
     num_agents = vecenv.observation_space.shape[0]
     device = args['train']['device']
 
+
+    d = policy.policy.phi_dim
+    num_skills = 4
+    metra_skills = torch.eye(num_skills, d, device=device)
+    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
+    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
+
+    trajectories = defaultdict(list)
+
     state = {}
     if args['train']['use_rnn']:
         state = dict(
@@ -1057,41 +1065,50 @@ def eval_skills(env_name, args=None, vecenv=None, policy=None):
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
 
-    frames = []
- 
-    while True:
+    for skill_id in range(num_skills):
+        skill = metra_skills[skill_id:skill_id+1]  # shape (1, d)
+        state = {"skill": skill}
 
-        render = driver.render()
-        if len(frames) < args['save_frames']:
-            frames.append(render)
+        ob, info = vecenv.reset()
+        for step in range(steps_per_skill):
+            # 3a. forward policy
+            with torch.no_grad():
+                ob_t = torch.as_tensor(ob, device=device)
+                logits, value = policy.forward_eval(ob_t, state)
+                action, _, _ = pufferlib.pytorch.sample_logits(logits)
+                action = action.cpu().numpy()
 
-        # Screenshot Ocean envs with F12, gifs with control + F12
-        if driver.render_mode == 'ansi':
-            print('\033[0;0H' + render + '\n')
-            time.sleep(1/args['fps'])
-        elif driver.render_mode == 'rgb_array':
-            pass
-            #import cv2
-            #render = cv2.cvtColor(render, cv2.COLOR_RGB2BGR)
-            #cv2.imshow('frame', render)
-            #cv2.waitKey(1)
-            #time.sleep(1/args['fps'])
-        
-        with torch.no_grad():
-            ob = torch.as_tensor(ob).to(device)
-            logits, value = policy.forward_eval(ob, state)
-            action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-            action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+            # 3b. step env
+            ob, r, d, t, infos = vecenv.step(action)
 
-        if isinstance(logits, torch.distributions.Normal):
-            action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
-        ob = vecenv.step(action)[0]
+            # 3c. query agent (x, y) from binding
+            pos_dict = vecenv.driver_env.get_positions()  # {"pos_0": (x,y), ...}
+            xy = pos_dict["pos_0"]   # only 1 agent in your env
+            trajectories[skill_id].append(xy)
 
-        if len(frames) > 0 and len(frames) == args['save_frames']:
-            import imageio
-            imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
-            frames.append('Done')
-     
+            if d.any() or t.any():
+                break
+
+    # 4. Plot background grid
+    grid = vecenv.driver_env.grid.reshape(vecenv.driver_env.height,
+                                          vecenv.driver_env.width)
+
+    plt.imshow(grid, cmap="gray_r", origin="upper")
+
+    # 5. Plot trajectories
+    colors = plt.cm.tab10.colors
+    for skill_id, traj in trajectories.items():
+        traj = np.array(traj)
+        plt.plot(traj[:, 0], traj[:, 1],
+                 marker="o", markersize=2,
+                 color=colors[skill_id % 10],
+                 label=f"Skill {skill_id}")
+
+    plt.legend()
+    plt.title("Skill-conditioned trajectories in environment")
+    plt.show()  
+
+
 def eval(env_name, args=None, vecenv=None, policy=None):
 
     import matplotlib.pyplot as plt
