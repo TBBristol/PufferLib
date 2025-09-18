@@ -32,6 +32,13 @@ const unsigned char COLOR_PURPLE = 3;
 const unsigned char COLOR_YELLOW = 4;
 const unsigned char COLOR_GREY = 5;
 
+#define NUM_OBJECTS 11   // UNSEEN..AGENT
+#define NUM_COLORS 6     // BLACK..GREY
+#define STATE_DIM 1      // keep 1 if you need it
+#define OBS_VEC_DIM (NUM_OBJECTS + NUM_COLORS + STATE_DIM)
+
+
+
 // PufferLib standard colors for rendering
 const Color PUFF_RED = (Color){187, 0, 0, 255};
 const Color PUFF_CYAN = (Color){0, 187, 187, 255};
@@ -130,9 +137,6 @@ void generate_observation(FourRooms* env) {
             int world_x = center_x - half_view + j;
             int world_y = center_y - half_view + i;
             
-            // Calculate flat index for this cell in the 7x7x3 observation
-            int base_idx = (i * view_size + j) * 3;
-            
             unsigned char object_idx, color_idx, state;
             
             // Check bounds, out of bounds is treated as wall
@@ -177,10 +181,24 @@ void generate_observation(FourRooms* env) {
                         break;
                 }
             }
-            
-            env->observations[base_idx] = object_idx;
-            env->observations[base_idx + 1] = color_idx;
-            env->observations[base_idx + 2] = state;
+
+            // ---- Write one-hot ----
+            int cell_idx = i * view_size + j;
+            int base_idx = cell_idx * OBS_VEC_DIM;
+
+            // clear slice
+            memset(&env->observations[base_idx], 0, OBS_VEC_DIM);
+
+            // one-hot object
+            if (object_idx < NUM_OBJECTS)
+                env->observations[base_idx + object_idx] = 1;
+
+            // one-hot color (shifted by NUM_OBJECTS)
+            if (color_idx < NUM_COLORS)
+                env->observations[base_idx + NUM_OBJECTS + color_idx] = 1;
+
+            // state (optional scalar)
+            env->observations[base_idx + NUM_OBJECTS + NUM_COLORS] = state;
         }
     }
 }

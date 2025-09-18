@@ -7,8 +7,8 @@ from pufferlib.ocean.four_rooms import binding
 
 class FourRooms(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=19, buf=None, seed=0):
-        self.single_observation_space = gymnasium.spaces.Box(low=0, high=10,
-            shape=(7*7*3,), dtype=np.uint8)
+        self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
+            shape=(7*7*18,), dtype=np.uint8)
         self.single_action_space = gymnasium.spaces.Discrete(7)
         self.render_mode = render_mode
         self.num_agents = num_envs

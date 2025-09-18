@@ -262,7 +262,6 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
 
@@ -1056,8 +1055,8 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
 
 
     d = policy.policy.phi_dim
-    num_skills = 4
-    metra_skills = torch.eye(num_skills, d, device=device)
+    num_skills = args['train']['metra_num_skills']
+    metra_skills = torch.eye(num_skills, d, device=device)  #TODO this is not consistent with traingin
     metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
     metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
 
@@ -1069,10 +1068,9 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
             lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
             lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
         )
-
     for skill_id in range(num_skills):
-        skill = metra_skills[skill_id:skill_id+1]  # shape (1, d)
-        state = {"skill": skill}
+        skill = metra_skills[skill_id].expand(num_agents, -1)  # shape (1, d)
+        state["skill"] = skill
 
         ob, info = vecenv.reset()
         for step in range(steps_per_skill):
@@ -1087,17 +1085,15 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
             ob, r, d, t, infos = vecenv.step(action)
 
             # 3c. query agent (x, y) from binding
-            pos_dict = vecenv.driver_env.get_positions()  # {"pos_0": (x,y), ...}
-            xy = pos_dict["pos_0"]   # only 1 agent in your env
+            pos_grid_dict = vecenv.driver_env.get_positions()  # {"pos_0": (x,y), ...}
+            xy = pos_grid_dict["env0"]['pos']
             trajectories[skill_id].append(xy)
 
             if d.any() or t.any():
                 break
 
     # 4. Plot background grid
-    grid = vecenv.driver_env.grid.reshape(vecenv.driver_env.height,
-                                          vecenv.driver_env.width)
-
+    grid = pos_grid_dict["env0"]['grid']
     plt.imshow(grid, cmap="gray_r", origin="upper")
 
     # 5. Plot trajectories
@@ -1144,7 +1140,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     d = policy.policy.phi_dim
     k = 2 
     
-    metra_skills = torch.eye(k,d, device = device) 
+    metra_skills = torch.eye(k,d, device = device) #TODO this is not consistent with traingin 
     #Metra skills have zero mean and unit variance which majes WAssertein cancel nicely
     metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
     metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-10)
