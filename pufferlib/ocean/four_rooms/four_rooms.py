@@ -41,6 +41,9 @@ class FourRooms(pufferlib.PufferEnv):
 
     def close(self):
         binding.vec_close(self.c_envs)
+    
+    def get_positions(self):
+        return binding.my_vec_get(self.c_envs)
 
 if __name__ == '__main__':
     N = 4096

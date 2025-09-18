@@ -158,6 +158,7 @@ MAKE_FUNCTIONS = {
     'crossing': 'RiverCrossing',
     'stacking': 'ContainerStacking',
     'whisker_racer': 'WhiskerRacer',
+    'four_rooms': 'FourRooms',
     'spaces': make_spaces,
     'multiagent': make_multiagent,
 }

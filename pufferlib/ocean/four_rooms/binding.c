@@ -18,3 +18,27 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "episode_length", log->episode_length);
     return 0;
 }
+
+#include <Python.h> 
+
+static PyObject* my_vec_get(PyObject* self, PyObject* args);
+#define MY_METHODS {"my_vec_get", my_vec_get, METH_VARARGS, "Get positions from all envs"}
+
+static PyObject* my_vec_get(PyObject* self, PyObject* args) {
+    VecEnv* vec = unpack_vecenv(args);
+    if (!vec) return NULL;
+
+    PyObject* dict = PyDict_New();
+    for (int e = 0; e < vec->num_envs; e++) {
+        Env* env = vec->envs[e];
+        PyObject* pos = Py_BuildValue("(ff)", env->agent_x, env->agent_y);
+
+        // key like "env0_pos_0"
+        char key[64];
+        snprintf(key, sizeof(key), "env%d", e);
+
+        PyDict_SetItemString(dict, key, pos);
+        Py_DECREF(pos);
+    }
+    return dict;
+}

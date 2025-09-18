@@ -203,11 +203,17 @@ class PuffeRL:
         #Metra skills - must be equal dim to phi state embedding
         d = self.policy.policy.phi_dim
         k = self.config['metra_num_skills']
-        
-        self.metra_skills = torch.eye(k,d, device = device) 
+
+
+        #eye does orthogonal skills
+        #self.metra_skills = torch.eye(k,d, device = device) 
+
+
+        self.metra_skills = torch.randn(k,d, device = device)
         #Metra skills have zero mean and unit variance which majes WAssertein cancel nicely
         self.metra_skills = self.metra_skills - self.metra_skills.mean(0, keepdim=True)
         self.metra_skills = self.metra_skills / (self.metra_skills.std(dim=1, keepdim=True) + 1e-10)
+    
 
         #for 4 skills 4 dim this looks like each row is then a discrete skill embedded
         #But dim is actually hidden _size as needs to be same as state embed
@@ -1034,7 +1040,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=None):
     import matplotlib.pyplot as plt
     from collections import defaultdict
-    from sklearn.decomposition import PCA
     args = args or load_config(env_name)
     backend = args['vec']['backend']
     if backend != 'PufferEnv':
