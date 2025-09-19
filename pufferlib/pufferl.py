@@ -206,7 +206,7 @@ class PuffeRL:
 
 
         #eye does orthogonal skills
-        #self.metra_skills = torch.eye(k,d, device = device) 
+        self.metra_skills = torch.eye(k,d, device = device) 
 
 
         self.metra_skills = torch.randn(k,d, device = device)
@@ -338,9 +338,9 @@ class PuffeRL:
                         z = self.skill_ids_buf[batch_rows, l-1]
                         z = self.metra_skills[z]
                         r_intr = (delta_phi *z).sum(dim = 1)
-                        r_intr = torch.clamp(r_intr, -1, 1)
+                        r_intr = torch.clamp(r_intr, -1, 1) #TODO NEEDED OR NOT?
                         self.rewards[batch_rows,l] = r_intr
-                        self.stats['intr_r'] = r_intr.mean().item()
+                        self.stats['intr_r'].append(r_intr.mean().item())
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
@@ -444,7 +444,7 @@ class PuffeRL:
             
 
             #encoder loss  # (||φ(s) - φ(s′)||²)^T z +  lambda . min (epsilon, 1- ||φ(s) - φ(s′)||²)
-            encoder_loss = -(delta_phi * z).sum(dim=-1).mean() + (lambda_val.detach() * violation).mean()
+            encoder_loss = -(delta_phi * z).sum(dim=-1).mean() + (lambda_val * violation).mean() #SHOUDL LAMBDA BE DETACHED?
             self.opt_enc.zero_grad()
             encoder_loss.backward(retain_graph = True) #becuase ppo update follows
             self.opt_enc.step()
@@ -507,8 +507,8 @@ class PuffeRL:
             losses['importance'] += ratio.mean().item() / self.total_minibatches
             losses['encoder loss'] += encoder_loss.item()/self.total_minibatches
             losses['lambda loss'] += lambda_loss.item()/self.total_minibatches
-            self.stats['dot'] = (delta_phi * z).sum(dim=-1).mean()
-            self.stats['log_lambda'] = self.log_lambda.item()
+            losses['dot'] += (delta_phi * z).sum(dim=-1).mean() /self.total_minibatches
+            losses['log_lambda'] += self.log_lambda.item() /self.total_minibatches
                    
 
 
@@ -1107,7 +1107,8 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
 
     plt.legend()
     plt.title("Skill-conditioned trajectories in environment")
-    plt.show()  
+    plt.savefig("skill_trajectories.png", dpi=300, bbox_inches="tight")
+    #plt.show()  
 
 
 def eval(env_name, args=None, vecenv=None, policy=None):

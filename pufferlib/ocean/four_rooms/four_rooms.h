@@ -127,10 +127,10 @@ void generate_observation(FourRooms* env) {
     int center_y = env->agent_y;
     
     // Shift center forward in the direction the agent is facing
-    if (env->agent_dir == 0) center_x += half_view; // East
+    /*if (env->agent_dir == 0) center_x += half_view; // East
     else if (env->agent_dir == 1) center_y += half_view; // South
     else if (env->agent_dir == 2) center_x -= half_view; // West
-    else if (env->agent_dir == 3) center_y -= half_view; // North
+    else if (env->agent_dir == 3) center_y -= half_view; // North*/
     
     for (int i = 0; i < view_size; i++) {
         for (int j = 0; j < view_size; j++) {
