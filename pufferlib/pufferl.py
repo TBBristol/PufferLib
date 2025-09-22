@@ -140,10 +140,17 @@ class PuffeRL:
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
             pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
+        #exclude lambda from params
+        if config['metra']:
+            if config['use_rnn']:
+                params = [p for n,p in self.policy.policy.named_parameters() if 'log_lambda' not in n]
+            else:
+                params = [p for n,p in self.policy.named_parameters() if 'log_lambda' not in n]
+           
         # Optimizer
         if config['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
-                self.policy.parameters(),
+                params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -154,7 +161,7 @@ class PuffeRL:
             import heavyball.utils
             heavyball.utils.compile_mode = config['compile_mode'] if config['compile'] else None
             optimizer = ForeachMuon(
-                self.policy.parameters(),
+                params,
                 lr=config['learning_rate'],
                 betas=(config['adam_beta1'], config['adam_beta2']),
                 eps=config['adam_eps'],
@@ -200,6 +207,31 @@ class PuffeRL:
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
+
+        # METRA
+        if config['metra']:
+            self.metra_args = dict(num_skills = config['metra_num_skills'], 
+                                   phi_dim = config['metra_phi_dim'], 
+                                   epsilon = config['metra_epsilon']
+                    )
+            self.phi_dim = self.metra_args['phi_dim']
+            self.num_skills = self.metra_args['num_skills']
+            #eye for orthogoal skills
+            self.metra_skills = torch.eye(self.num_skills,self.phi_dim, device=self.config['device'])
+
+            #rand for random skill vects
+            #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
+            #metra skills zero mean and unit variance to make waserstein cancel nicely
+            self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=0, keepdim=True)
+            self.metra_skills = self.metra_skills / (1e-8 + self.metra_skills.std(dim=1, keepdim=True))
+
+            self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=self.config['device'])
+            self.epsilon = self.metra_args.get('epsilon', 1.0)
+        else:
+            self.metra_args = None
+
+
+                
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -250,6 +282,11 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
+
+                if self.metra_args is not None:
+                    skill_id = self.skill_ids[env_id]
+                    skill = self.metra_skills[skill_id]
+                    state['skill'] = skill
 
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
@@ -315,6 +352,10 @@ class PuffeRL:
 
     @record
     def train(self):
+
+        assert self.skill_ids.dtype == torch.long
+        assert self.skill_ids.min() >= 0
+        assert self.skill_ids.max() < self.num_skills
         profile = self.profile
         epoch = self.epoch
         profile('train', epoch)
@@ -328,6 +369,30 @@ class PuffeRL:
         vf_clip = config['vf_clip_coef']
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
+
+        #calculate intrisic and overwrite rewards
+        if self.metra_args is not None:
+
+            with torch.no_grad():
+                B,S,D = self.observations.shape
+                obs_flat = self.observations.reshape(B*S, D)
+                if config['use_rnn']:
+                    phi = self.policy.policy.phi_encoder(obs_flat)
+                else:
+                    phi = self.policy.phi_encoder(obs_flat)
+                phi = phi.reshape(B,S,-1 ) #B,S,D
+                delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                z = self.metra_skills[self.skill_ids] #B,skill_dim
+                z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
+                
+                r_intr = torch.zeros_like(self.rewards, device=device) #B,S
+                step_rewards = (delta_phi*z).sum(dim=-1) #B,S
+                r_intr[:,1:] = step_rewards
+
+                self.rewards = r_intr
+            
+                #detach?
+
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
@@ -355,6 +420,9 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
+            if self.metra_args is not None:
+                mb_skills = self.metra_skills[self.skill_ids[idx]]
+                mb_skills = mb_skills.unsqueeze(1).expand(-1, mb_obs.shape[1], -1) #[b,s,skill_dim]
 
             profile('train_forward', epoch)
             if not config['use_rnn']:
@@ -365,10 +433,10 @@ class PuffeRL:
                 lstm_h=None,
                 lstm_c=None,
             )
-
+            if self.metra_args is not None:
+                state['skill'] = mb_skills.reshape(-1, self.num_skills)
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
-
             profile('train_misc', epoch)
             newlogprob = newlogprob.reshape(mb_logprobs.shape)
             logratio = newlogprob - mb_logprobs
@@ -401,6 +469,40 @@ class PuffeRL:
             entropy_loss = entropy.mean()
 
             loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+
+            #METRA LOSS STUFF
+
+            if self.metra_args is not None:
+                
+
+                B,S,D = mb_obs.shape
+                obs_flat = mb_obs.reshape(B*S, D)
+                if config['use_rnn']:
+                    phi = self.policy.policy.phi_encoder(obs_flat)
+                else:
+                    phi = self.policy.phi_encoder(obs_flat)
+                phi = phi.reshape(B,S,-1 ) #B,S,D
+                delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                z = mb_skills[:,:-1,:] #B,skill_dim
+
+                enc_loss = -(delta_phi*z).sum(dim=-1) #B,S-1
+                
+                constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1
+                constraint = torch.clamp(constraint, max = self.epsilon)
+                constraint = constraint.mean()
+
+                if config['use_rnn']:
+                    log_lambda = self.policy.policy.log_lambda
+                else:
+                    log_lambda = self.policy.log_lambda
+                lambda_val = log_lambda.exp()
+                encoder_loss =  -enc_loss.mean() + (lambda_val.detach()*constraint)
+                loss += encoder_loss
+
+                lambda_loss = log_lambda * constraint.detach()
+                lambda_loss.backward()
+                
+               
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
             # This breaks vloss clipping?
@@ -415,7 +517,10 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-
+            losses['encoder_loss'] += encoder_loss.item() / self.total_minibatches
+            losses['lambda_loss'] += lambda_loss.item()/     self.total_minibatches
+            losses['lambda'] += lambda_val.item() /self.total_minibatches
+           
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
@@ -423,6 +528,15 @@ class PuffeRL:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+
+            if self.metra_args is not None:
+                if config['use_rnn']:
+                    lambda_opt = self.policy.policy.lambda_opt
+                else:
+                    lambda_opt = self.policy.lambda_opt
+
+                lambda_opt.step()
+                lambda_opt.zero_grad()
 
         # Reprioritize experience
         profile('train_misc', epoch)
