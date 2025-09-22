@@ -603,6 +603,8 @@ class PuffeRL:
         self.logger.log(logs, agent_steps)
         return logs
 
+
+
     def close(self):
         self.vecenv.close()
         self.utilization.stop()
@@ -1107,6 +1109,80 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             import imageio
             imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
+
+def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=None):
+    import matplotlib.pyplot as plt
+    from collections import defaultdict
+    args = args or load_config(env_name)
+    backend = args['vec']['backend']
+    if backend != 'PufferEnv':
+        backend = 'Serial'
+
+    args['vec'] = dict(backend=backend, num_envs=1)
+    vecenv = vecenv or load_env(env_name, args)
+
+    policy = policy or load_policy(args, vecenv, env_name)
+    ob, info = vecenv.reset()
+    driver = vecenv.driver_env
+    num_agents = vecenv.observation_space.shape[0]
+    device = args['train']['device']
+
+
+    d = policy.policy.phi_dim
+    num_skills = args['train']['metra_num_skills']
+    metra_skills = torch.eye(num_skills, d, device=device)  #TODO this is not consistent with traingin
+    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
+    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
+
+    trajectories = defaultdict(list)
+
+    state = {}
+    if args['train']['use_rnn']:
+        state = dict(
+            lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
+            lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
+        )
+    for skill_id in range(num_skills):
+        skill = metra_skills[skill_id].expand(num_agents, -1)  # shape (1, d)
+        state["skill"] = skill
+
+        ob, info = vecenv.reset()
+        for step in range(steps_per_skill):
+            # 3a. forward policy
+            with torch.no_grad():
+                ob_t = torch.as_tensor(ob, device=device)
+                logits, value = policy.forward_eval(ob_t, state)
+                action, _, _ = pufferlib.pytorch.sample_logits(logits)
+                action = action.cpu().numpy()
+
+            # 3b. step env
+            ob, r, d, t, infos = vecenv.step(action)
+
+            # 3c. query agent (x, y) from binding
+            pos_grid_dict = vecenv.driver_env.get_positions()  # {"pos_0": (x,y), ...}
+            xy = pos_grid_dict["env0"]['pos']
+            trajectories[skill_id].append(xy)
+
+            if d.any() or t.any():
+                break
+
+    # 4. Plot background grid
+    grid = pos_grid_dict["env0"]['grid']
+    plt.imshow(grid, cmap="gray_r", origin="upper")
+
+    # 5. Plot trajectories
+    colors = plt.cm.tab10.colors
+    for skill_id, traj in trajectories.items():
+        traj = np.array(traj)
+        plt.plot(traj[:, 0], traj[:, 1],
+                 marker="o", markersize=2,
+                 color=colors[skill_id % 10],
+                 label=f"Skill {skill_id}")
+
+    plt.legend()
+    plt.title("Skill-conditioned trajectories in environment")
+    plt.savefig("skill_trajectories.png", dpi=300, bbox_inches="tight")
+    #plt.show() 
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)
