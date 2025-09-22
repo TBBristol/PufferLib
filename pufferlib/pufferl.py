@@ -353,9 +353,6 @@ class PuffeRL:
     @record
     def train(self):
 
-        assert self.skill_ids.dtype == torch.long
-        assert self.skill_ids.min() >= 0
-        assert self.skill_ids.max() < self.num_skills
         profile = self.profile
         epoch = self.epoch
         profile('train', epoch)
@@ -386,7 +383,8 @@ class PuffeRL:
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
-                step_rewards = (delta_phi*z).sum(dim=-1) #B,S
+                step_rewards = (delta_phi*z).sum(dim=-1)/S #B,S  Normalise to S do we need this? its not in paper
+                step_rewards = torch.clamp(step_rewards, -1, 1)
                 r_intr[:,1:] = step_rewards
 
                 self.rewards = r_intr
@@ -488,7 +486,7 @@ class PuffeRL:
                 enc_loss = -(delta_phi*z).sum(dim=-1) #B,S-1
                 
                 constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1
-                constraint = torch.clamp(constraint, max = self.epsilon)
+                constraint = torch.clamp(constraint, max = self.epsilon, min = 1e-8)
                 constraint = constraint.mean()
 
                 if config['use_rnn']:
