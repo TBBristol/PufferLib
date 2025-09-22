@@ -24,6 +24,7 @@ class Default(nn.Module):
     def __init__(self, env, hidden_size=128, phi_dim=2):
         super().__init__()
         self.hidden_size = hidden_size
+        self.phi_dim = phi_dim
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
@@ -104,7 +105,6 @@ class Default(nn.Module):
         skills = state['skill']
         assert skills is not None, "Must pass skill in state dict"
         assert skills.shape[0] == observations.shape[0], "Batch size of skills must match observations"
-        assert skills.shape[-1]  == observations.shape[-1], "Skill shape must match last dimension of observations"
         observations = torch.cat([observations, skills], dim=-1)
         batch_size = observations.shape[0]
         if self.is_dict_obs:

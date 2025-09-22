@@ -372,7 +372,7 @@ class PuffeRL:
 
             with torch.no_grad():
                 B,S,D = self.observations.shape
-                obs_flat = self.observations.reshape(B*S, D)
+                obs_flat = self.observations.reshape(B*S, D).float()
                 if config['use_rnn']:
                     phi = self.policy.policy.phi_encoder(obs_flat)
                 else:
@@ -474,7 +474,7 @@ class PuffeRL:
                 
 
                 B,S,D = mb_obs.shape
-                obs_flat = mb_obs.reshape(B*S, D)
+                obs_flat = mb_obs.reshape(B*S, D).float()
                 if config['use_rnn']:
                     phi = self.policy.policy.phi_encoder(obs_flat)
                 else:
@@ -1393,6 +1393,8 @@ def main():
         train(env_name=env_name)
     elif mode == 'eval':
         eval(env_name=env_name)
+    elif mode == 'eval_skills':
+        eval_skills(env_name=env_name)
     elif mode == 'sweep':
         sweep(env_name=env_name)
     elif mode == 'autotune':

@@ -133,6 +133,7 @@ MAKE_FUNCTIONS = {
     'boids': 'Boids',
     'drone_race': 'DroneRace',
     'drone_swarm': 'DroneSwarm',
+    'four_rooms': 'FourRooms',
     'nmmo3': 'NMMO3',
     'snake': 'Snake',
     'squared': 'Squared',
