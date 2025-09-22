@@ -383,7 +383,7 @@ class PuffeRL:
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
-                step_rewards = (delta_phi*z).sum(dim=-1)/S #B,S  Normalise to S do we need this? its not in paper
+                step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
                 step_rewards = torch.clamp(step_rewards, -1, 1)
                 r_intr[:,1:] = step_rewards
 
