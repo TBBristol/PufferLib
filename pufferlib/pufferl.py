@@ -385,9 +385,9 @@ class PuffeRL:
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
                 step_rewards = torch.clamp(step_rewards, -1, 1)
-                r_intr[:,1:] = step_rewards
+                r_intr[:,:-1] = step_rewards
 
-                self.rewards = r_intr
+                self.rewards = r_intr.detach()
             
                 #detach?
 
@@ -482,7 +482,6 @@ class PuffeRL:
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
-
                 enc_loss = -(delta_phi*z).sum(dim=-1) #B,S-1
                 
                 constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1

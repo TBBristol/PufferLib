@@ -21,7 +21,7 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128, phi_dim=2):
+    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0):
         super().__init__()
         self.hidden_size = hidden_size
         self.phi_dim = phi_dim
@@ -87,7 +87,8 @@ class Default(nn.Module):
         )
 
         #lamda initialization
-        self.log_lambda = torch.nn.Parameter(torch.tensor(0.0))
+        self.log_lambda = torch.log(torch.tensor(inital_lambda))
+        self.log_lambda = torch.nn.Parameter(self.log_lambda)
         self.lambda_opt = torch.optim.Adam([self.log_lambda], lr=1e-3)
 
 
