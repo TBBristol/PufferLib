@@ -56,7 +56,7 @@ class Default(nn.Module):
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
             )
-            
+         
         #decoder
         if self.is_multidiscrete:
             self.action_nvec = tuple(env.single_action_space.nvec)

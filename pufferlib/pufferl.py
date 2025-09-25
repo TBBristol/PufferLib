@@ -498,7 +498,6 @@ class PuffeRL:
 
                 lambda_loss = log_lambda * constraint.detach()
                 lambda_loss.backward()
-                
                
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
