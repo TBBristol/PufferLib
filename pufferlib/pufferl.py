@@ -388,6 +388,8 @@ class PuffeRL:
                 r_intr[:,:-1] = step_rewards
 
                 self.rewards = r_intr.detach()
+                self.stats['intrinsic_return'] = r_intr.sum(dim=1).mean().item()
+                self.stats['intrinsic_step']= r_intr.mean().item()
             
                 #detach?
 
@@ -1052,6 +1054,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.logger.close(model_path)
     return all_logs
 
+
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
     backend = args['vec']['backend']
@@ -1108,6 +1111,89 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             imageio.mimsave(args['gif_path'], frames, fps=args['fps'], loop=0)
             frames.append('Done')
 
+def eval_ant(env_name,
+    steps_per_skill=200,
+    episodes_per_skill=5,
+    args=None,
+    vecenv=None,
+    policy=None,
+):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from collections import defaultdict
+
+    args = args or load_config(env_name)
+    backend = args['vec']['backend']
+    if backend != 'PufferEnv':
+        backend = 'Serial'
+    args['vec'] = dict(backend=backend, num_envs=1)
+
+    vecenv = vecenv or load_env(env_name, args)
+    policy = policy or load_policy(args, vecenv, env_name)
+
+    ob, info = vecenv.reset()
+    driver = vecenv.driver_env
+    num_agents = vecenv.observation_space.shape[0]
+    device = args['train']['device']
+
+    # build skill vectors
+    d = policy.policy.phi_dim
+    num_skills = args['train']['metra_num_skills']
+    metra_skills = torch.eye(num_skills, d, device=device)
+    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
+    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
+
+    trajectories = defaultdict(list)
+
+    base_state = {}
+    if args['train']['use_rnn']:
+        base_state = dict(
+            lstm_h=torch.zeros(num_agents, policy.hidden_size, device=device),
+            lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
+        )
+
+    for skill_id in range(num_skills):
+        skill = metra_skills[skill_id].expand(num_agents, -1)
+
+        for ep in range(episodes_per_skill):
+            ob, info = vecenv.reset()
+            state = dict(**base_state, skill=skill)
+
+            traj = []
+            for step in range(steps_per_skill):
+                with torch.no_grad():
+                    ob_t = torch.as_tensor(ob, device=device)
+                    logits, value = policy.forward_eval(ob_t, state)
+                    action, _, _ = pufferlib.pytorch.sample_logits(logits)
+                    action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+
+                ob, r, d, t, infos = vecenv.step(action)
+
+                # record torso global (x,y)
+                xy = driver.env.unwrapped.data.qpos[0:2].copy()
+                traj.append(xy)
+
+                if d.any() or t.any():
+                    break
+
+            trajectories[skill_id].append(np.array(traj))
+
+    # plotting
+    colors = plt.cm.tab10.colors
+    for skill_id, trajs in trajectories.items():
+        for traj in trajs:
+            plt.plot(
+                traj[:, 0], traj[:, 1],
+                alpha=0.6,
+                color=colors[skill_id % 10],
+                label=f"Skill {skill_id}" if traj is trajs[0] else None,
+            )
+
+    plt.legend()
+    plt.axis("equal")
+    plt.title("Ant skill-conditioned trajectories")
+    plt.savefig("ant_skill_trajectories.png", dpi=300, bbox_inches="tight")
+    # plt.show()
 def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=None):
     import matplotlib.pyplot as plt
     from collections import defaultdict
@@ -1393,6 +1479,8 @@ def main():
         eval(env_name=env_name)
     elif mode == 'eval_skills':
         eval_skills(env_name=env_name)
+    elif mode == 'eval_ant':
+        eval_ant(env_name=env_name)
     elif mode == 'sweep':
         sweep(env_name=env_name)
     elif mode == 'autotune':
