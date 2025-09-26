@@ -484,7 +484,7 @@ class PuffeRL:
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
-                enc_loss = -(delta_phi*z).sum(dim=-1) #B,S-1
+                enc_loss = (delta_phi*z).sum(dim=-1) #B,S-1
                 
                 constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1
                 constraint = torch.clamp(constraint, max = self.epsilon, min = 1e-8)
