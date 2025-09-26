@@ -25,10 +25,10 @@ def single_env_creator(env_name, capture_video, gamma,
 
     if obs_norm:
         env = gymnasium.wrappers.NormalizeObservation(env)
-        env = gymnasium.wrappers.TransformObservation(env, f=lambda obs: np.clip(obs, -10, 10))
+        env = gymnasium.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), env.observation_space)
 
     env = gymnasium.wrappers.NormalizeReward(env, gamma=gamma)
-    env = gymnasium.wrappers.TransformReward(env, f = lambda reward: np.clip(reward, -10, 10))
+    env = gymnasium.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
 
     if pufferl is True:
         env = pufferlib.emulation.GymnasiumPufferEnv(env=env, buf=buf)
