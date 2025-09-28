@@ -84,6 +84,8 @@ class Default(nn.Module):
         self.phi_encoder = torch.nn.Sequential(
             pufferlib.pytorch.layer_init(nn.Linear(phi_input_size, hidden_size)),
             nn.GELU(),
+            pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.GELU(),
             pufferlib.pytorch.layer_init(nn.Linear(hidden_size, phi_dim)),
         )
 

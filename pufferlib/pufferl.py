@@ -484,7 +484,8 @@ class PuffeRL:
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
-                enc_loss = (delta_phi*z).sum(dim=-1) #B,S-1
+
+                enc_term= (delta_phi*z).sum(dim=-1) #B,S-1
                 
                 constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1
                 constraint = torch.clamp(constraint, max = self.epsilon, min = 1e-8)
@@ -495,10 +496,13 @@ class PuffeRL:
                 else:
                     log_lambda = self.policy.log_lambda
                 lambda_val = log_lambda.exp()
-                encoder_loss =  -enc_loss.mean() + (lambda_val.detach()*constraint)
+
+                constraint_term = lambda_val.detach()*constraint
+                encoder_loss =  -enc_term.mean() +constraint_term
+
                 loss += encoder_loss
 
-                lambda_loss = log_lambda * constraint.detach()
+                lambda_loss = -(log_lambda * constraint.detach())
                 lambda_loss.backward()
                
             self.amp_context.__enter__() # TODO: AMP needs some debugging
