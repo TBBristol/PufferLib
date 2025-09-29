@@ -222,7 +222,6 @@ class PuffeRL:
             #rand for random skill vects
             #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
             #metra skills zero mean and unit variance to make waserstein cancel nicely
-            breakpoint()
             self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
             self.metra_skills *= self.num_skills
             self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
@@ -385,7 +384,7 @@ class PuffeRL:
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
-                step_rewards = torch.clamp(step_rewards, -1, 1)
+               # step_rewards = torch.clamp(step_rewards, -1, 1)
                 r_intr[:,:-1] = step_rewards
 
                 self.rewards = r_intr.detach()
@@ -487,10 +486,9 @@ class PuffeRL:
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
                 enc_term= (delta_phi*z).sum(dim=-1) #B,S-1
-                
-                constraint = 1- delta_phi.pow(2).sum(dim=-1) #B,S-1
-                constraint = torch.clamp(constraint, max = self.epsilon, min = 1e-8)
-                constraint = constraint.mean()
+                constraint = 1- delta_phi.pow(2).mean(dim=-1) #B,S-1
+                constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
+               # constraint = constraint.mean()
 
                 if config['use_rnn']:
                     log_lambda = self.policy.policy.log_lambda
@@ -499,11 +497,11 @@ class PuffeRL:
                 lambda_val = log_lambda.exp()
 
                 constraint_term = lambda_val.detach()*constraint
-                encoder_loss =  -enc_term.mean() +constraint_term
+                te_obj =  enc_term +constraint_term
+                te_loss = -te_obj.mean()
+                loss += te_loss
 
-                loss += encoder_loss
-
-                lambda_loss = -(log_lambda * constraint.detach())
+                lambda_loss = (log_lambda * constraint.detach().mean())
                 lambda_loss.backward()
                
             self.amp_context.__enter__() # TODO: AMP needs some debugging
@@ -520,7 +518,7 @@ class PuffeRL:
             losses['approx_kl'] += approx_kl.item() / self.total_minibatches
             losses['clipfrac'] += clipfrac.item() / self.total_minibatches
             losses['importance'] += ratio.mean().item() / self.total_minibatches
-            losses['encoder_loss'] += encoder_loss.item() / self.total_minibatches
+            losses['te_loss'] += te_loss.item() / self.total_minibatches
             losses['lambda_loss'] += lambda_loss.item()/     self.total_minibatches
             losses['lambda'] += lambda_val.item() /self.total_minibatches
            
