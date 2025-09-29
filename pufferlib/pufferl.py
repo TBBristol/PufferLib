@@ -485,10 +485,9 @@ class PuffeRL:
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
-                enc_term= (delta_phi*z).sum(dim=-1) #B,S-1
+                rewards= (delta_phi*z).sum(dim=-1) #B,S-1
                 constraint = 1- delta_phi.pow(2).mean(dim=-1) #B,S-1
                 constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
-               # constraint = constraint.mean()
 
                 if config['use_rnn']:
                     log_lambda = self.policy.policy.log_lambda
@@ -496,8 +495,7 @@ class PuffeRL:
                     log_lambda = self.policy.log_lambda
                 lambda_val = log_lambda.exp()
 
-                constraint_term = lambda_val.detach()*constraint
-                te_obj =  enc_term +constraint_term
+                te_obj =  rewards + lambda_val.detach()*constraint
                 te_loss = -te_obj.mean()
                 loss += te_loss
 
