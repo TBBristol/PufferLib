@@ -374,7 +374,7 @@ class PuffeRL:
                 B,S,D = self.observations.shape
                 obs_flat = self.observations.reshape(B*S, D).float()
                 if config['use_rnn']:
-                    phi = self.policy.policy.phi_encoder(obs_flat)
+                    phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
                 else:
                     phi = self.policy.phi_encoder(obs_flat)
                 phi = phi.reshape(B,S,-1 ) #B,S,D
@@ -452,7 +452,6 @@ class PuffeRL:
             adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
-            adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
             # Losses
@@ -478,7 +477,7 @@ class PuffeRL:
                 B,S,D = mb_obs.shape
                 obs_flat = mb_obs.reshape(B*S, D).float()
                 if config['use_rnn']:
-                    phi = self.policy.policy.phi_encoder(obs_flat)
+                    phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
                 else:
                     phi = self.policy.phi_encoder(obs_flat)
                 phi = phi.reshape(B,S,-1 ) #B,S,D
@@ -486,7 +485,7 @@ class PuffeRL:
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
                 rewards= (delta_phi*z).sum(dim=-1) #B,S-1
-                constraint = 1- delta_phi.pow(2).mean(dim=-1) #B,S-1
+                constraint = 1- (delta_phi.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
                 constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
 
                 if config['use_rnn']:
