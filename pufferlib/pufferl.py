@@ -222,9 +222,10 @@ class PuffeRL:
             #rand for random skill vects
             #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
             #metra skills zero mean and unit variance to make waserstein cancel nicely
-            self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=0, keepdim=True)
-            self.metra_skills = self.metra_skills / (1e-8 + self.metra_skills.std(dim=1, keepdim=True))
-
+            breakpoint()
+            self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
+            self.metra_skills *= self.num_skills
+            self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
             self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=self.config['device'])
             self.epsilon = self.metra_args.get('epsilon', 1.0)
         else:
