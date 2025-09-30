@@ -222,9 +222,16 @@ class PuffeRL:
             #rand for random skill vects
             #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
             #metra skills zero mean and unit variance to make waserstein cancel nicely
-            self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
+
+            """self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
             self.metra_skills *= self.num_skills
-            self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
+            self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)"""
+
+
+            self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
+            var = self.metra_skills.var(unbiased=False)
+            self.metra_skills = self.metra_skills / torch.sqrt(var + 1e-8)
+
             self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=self.config['device'])
             self.epsilon = self.metra_args.get('epsilon', 1.0)
         else:
@@ -1000,7 +1007,6 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
         print(f"rank: {local_rank}, MASTER_ADDR={master_addr}, MASTER_PORT={master_port}")
         torch.cuda.set_device(local_rank)
         os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
-
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
 
@@ -1143,8 +1149,9 @@ def eval_ant(env_name,
     d = policy.policy.phi_dim
     num_skills = args['train']['metra_num_skills']
     metra_skills = torch.eye(num_skills, d, device=device)
-    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
-    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
+    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
+    var = metra_skills.var(unbiased=False)
+    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
 
     trajectories = defaultdict(list)
 
