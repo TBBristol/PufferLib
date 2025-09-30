@@ -384,7 +384,10 @@ class PuffeRL:
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
-               # step_rewards = torch.clamp(step_rewards, -1, 1)
+                # normalize to zero mean, unit variance per batch
+                step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
+
+                step_rewards = torch.clamp(step_rewards, -1, 1)
                 r_intr[:,:-1] = step_rewards
 
                 self.rewards = r_intr.detach()
