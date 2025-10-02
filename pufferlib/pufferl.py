@@ -263,7 +263,7 @@ class PuffeRL:
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
-
+        
         self.full_rows = 0
         while self.full_rows < self.segments:
             profile('env', epoch)
@@ -1079,6 +1079,14 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     num_agents = vecenv.observation_space.shape[0]
     device = args['train']['device']
 
+    # build skill vectors                                                                             
+    d = policy.policy.phi_dim                                                                           
+    num_skills = args['train']['metra_num_skills']                                                     
+    metra_skills = torch.eye(num_skills, d, device=device)                                             
+    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)                               
+    var = metra_skills.var(unbiased=False)                                                             
+    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
+
     state = {}
     if args['train']['use_rnn']:
         state = dict(
@@ -1087,7 +1095,12 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         )
 
     frames = []
+    steps = 0
+    skill_id = 0
+    skill = metra_skills[skill_id].expand(num_agents, -1)
+    state["skill"] = skill
     while True:
+
         render = driver.render()
         if len(frames) < args['save_frames']:
             frames.append(render)
@@ -1113,7 +1126,15 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         if isinstance(logits, torch.distributions.Normal):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
-        ob = vecenv.step(action)[0]
+        ob, r, d, t, infos = vecenv.step(action)
+        steps +=1
+
+        if t.any() or steps >= 1000:
+            skill_id +=1 if skill_id < num_skills-1 else 0
+            skill = metra_skills[skill_id].expand(num_agents, -1)
+            state["skill"] = skill
+            vecenv.reset()
+            steps = 0
 
         if len(frames) > 0 and len(frames) == args['save_frames']:
             import imageio
@@ -1121,7 +1142,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             frames.append('Done')
 
 def eval_ant(env_name,
-    steps_per_skill=200,
+    steps_per_skill=20000,
     episodes_per_skill=5,
     args=None,
     vecenv=None,
@@ -1183,7 +1204,7 @@ def eval_ant(env_name,
                 xy = driver.env.unwrapped.data.qpos[0:2].copy()
                 traj.append(xy)
 
-                if d.any() or t.any():
+                if t.any(): #d.any() or t.any()
                     break
 
             trajectories[skill_id].append(np.array(traj))
@@ -1224,9 +1245,10 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
 
     d = policy.policy.phi_dim
     num_skills = args['train']['metra_num_skills']
-    metra_skills = torch.eye(num_skills, d, device=device)  #TODO this is not consistent with traingin
+    metra_skills = torch.eye(num_skills, d, device=device)      
     metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
     metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
+   
 
     trajectories = defaultdict(list)
 
