@@ -238,6 +238,10 @@ class PuffeRL:
             self.metra_args = None
 
 
+            import geoopt
+            self.ball = geopt.PoinccareBall(c=1.0)
+
+
                 
     @property
     def uptime(self):
@@ -384,13 +388,20 @@ class PuffeRL:
                     phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
                 else:
                     phi = self.policy.phi_encoder(obs_flat)
-                phi = phi.reshape(B,S,-1 ) #B,S,D
-                delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+
+
+                phi_hyp = self.ball.expmap0(phi, project = True)  
+
+                phi_hyp = phi_hyp.reshape(B,S,-1 ) #B,S,D
+                #delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                phi_prev, phi_next = phi_hyp[:,:-1,:], phi_hyp[:,1:,:]
+                hyp_dist = self.ball.logmap(phi_prev, phi_next)
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
-                step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
+                #step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
+                step_rewards = self.ball.inner(phi_prev, hyp_dist,z)
                 # normalize to zero mean, unit variance per batch
                 step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
 
@@ -490,12 +501,22 @@ class PuffeRL:
                     phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
                 else:
                     phi = self.policy.phi_encoder(obs_flat)
+                
+                phi_hyp = self.ball.expmap0(phi, project = True)
+
                 phi = phi.reshape(B,S,-1 ) #B,S,D
-                delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                phi_prev, phi_next = phi_hyp[:,:-1,:], phi_hyp[:,1:,:]
+                hyp_dist = self.ball.logmap(phi_prev, phi_next)
+                #delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
-                rewards= (delta_phi*z).sum(dim=-1) #B,S-1
-                constraint = 1- (delta_phi.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
+                #rewards= (delta_phi*z).sum(dim=-1) #B,S-1
+                rewards = self.ball.inner(phi_prev, hyp_dist,z)
+                #constraint = 1- (hyp_dist.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
+                
+
+                v_reiman_sq = self.ball.inner(phi_prev, hyp_dist, hyp_dist)
+                constraint = 1- v_reiman_sq
                 constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
 
                 if config['use_rnn']:
