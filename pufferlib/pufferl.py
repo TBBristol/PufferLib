@@ -402,8 +402,10 @@ class PuffeRL:
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
-                #step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
-                step_rewards = self.ball.inner(phi_prev, hyp_dist,z, keepdim=True) #B,S,1
+                #step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper        
+                z_ball = self.ball.transp0(phi_prev, z)
+
+                step_rewards = self.ball.inner(phi_prev, hyp_dist,z_ball, keepdim=True) #B,S,1
                 step_rewards = step_rewards.squeeze(-1) #B,S
                 # normalize to zero mean, unit variance per batch
                 step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
@@ -513,8 +515,10 @@ class PuffeRL:
                 #delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
+                z_ball = self.ball.transp0(phi_prev, z)
+
                 #rewards= (delta_phi*z).sum(dim=-1) #B,S-1
-                rewards = self.ball.inner(phi_prev, hyp_dist,z, keepdim=True) #B,S-1,1
+                rewards = self.ball.inner(phi_prev, hyp_dist,z_ball, keepdim=True) #B,S-1,1
                 rewards = rewards.squeeze(-1) #B,S-1
                 #constraint = 1- (hyp_dist.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
 
