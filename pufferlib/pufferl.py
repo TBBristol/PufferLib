@@ -411,11 +411,17 @@ class PuffeRL:
                 step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
 
                 step_rewards = torch.clamp(step_rewards, -1, 1)
+
                 r_intr[:,:-1] = step_rewards
 
                 self.rewards = r_intr.detach()
+
                 self.stats['intrinsic_return'] = r_intr.sum(dim=1).mean().item()
                 self.stats['intrinsic_step']= r_intr.mean().item()
+
+                for k in range(self.num_skills):
+                    mask = self.skill_ids == k
+                    self.stats[f'int_return_skill_{k}'] = r_intr[mask].sum(dim=1).mean().item()
             
                 #detach?
 
