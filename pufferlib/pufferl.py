@@ -395,13 +395,16 @@ class PuffeRL:
                 phi_hyp = phi_hyp.reshape(B,S,-1 ) #B,S,D
                 #delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 phi_prev, phi_next = phi_hyp[:,:-1,:], phi_hyp[:,1:,:]
+
+
                 hyp_dist = self.ball.logmap(phi_prev, phi_next)
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
-                z = z.unsqueeze(1).expand(-1,S-1,-1).clone() #B,S-1,skill_dim
+                z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 #step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
-                step_rewards = self.ball.inner(phi_prev, hyp_dist,z)
+                step_rewards = self.ball.inner(phi_prev, hyp_dist,z, keepdim=True) #B,S,1
+                step_rewards = step_rewards.squeeze(-1) #B,S
                 # normalize to zero mean, unit variance per batch
                 step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
 
@@ -511,11 +514,13 @@ class PuffeRL:
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
                 #rewards= (delta_phi*z).sum(dim=-1) #B,S-1
-                rewards = self.ball.inner(phi_prev, hyp_dist,z)
+                rewards = self.ball.inner(phi_prev, hyp_dist,z, keepdim=True) #B,S-1,1
+                rewards = rewards.squeeze(-1) #B,S-1
                 #constraint = 1- (hyp_dist.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
-                
 
-                v_reiman_sq = self.ball.inner(phi_prev, hyp_dist, hyp_dist)
+                v_reiman_sq = self.ball.inner(phi_prev, hyp_dist, hyp_dist, keepdim=True)
+                
+                v_reiman_sq = v_reiman_sq.squeeze(-1) #B,S-1
                 constraint = 1- v_reiman_sq
                 constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
 
