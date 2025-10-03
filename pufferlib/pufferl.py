@@ -238,8 +238,8 @@ class PuffeRL:
             self.metra_args = None
 
 
-            import geoopt
-            self.ball = geopt.PoinccareBall(c=1.0)
+        import geoopt
+        self.ball = geoopt.PoincareBall(c=1.0)
 
 
                 
@@ -397,7 +397,7 @@ class PuffeRL:
                 phi_prev, phi_next = phi_hyp[:,:-1,:], phi_hyp[:,1:,:]
                 hyp_dist = self.ball.logmap(phi_prev, phi_next)
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
-                z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
+                z = z.unsqueeze(1).expand(-1,S-1,-1).clone() #B,S-1,skill_dim
                 
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 #step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
@@ -504,7 +504,7 @@ class PuffeRL:
                 
                 phi_hyp = self.ball.expmap0(phi, project = True)
 
-                phi = phi.reshape(B,S,-1 ) #B,S,D
+                phi_hyp = phi_hyp.reshape(B,S,-1 ) #B,S,D
                 phi_prev, phi_next = phi_hyp[:,:-1,:], phi_hyp[:,1:,:]
                 hyp_dist = self.ball.logmap(phi_prev, phi_next)
                 #delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
