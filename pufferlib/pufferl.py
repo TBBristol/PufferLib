@@ -460,9 +460,10 @@ class PuffeRL:
                     return (x[mask].min() if mask.any() else torch.tensor(float('nan'), device=x.device))
 
                  # statistics
-                minR  = nanmin(Rk)                    # worst skill avg return
-                meanR = nanmean(Rk)                   # average across skills
-                stdR  = nanstd(Rk)    # variation
+                absRk = torch.abs(Rk)
+                minR  = nanmin(absRk)                    # worst skill avg return
+                meanR = nanmean(absRk)                   # average across skills
+                stdR  = nanstd(absRk)    # variation
                 H     = -(pk.clamp_min(1e-8) * pk.clamp_min(1e-8).log()).sum() / math.log(num_skills)
                 # log all pieces
                 self.stats['sweep/min_return'] = float(minR)
@@ -474,7 +475,6 @@ class PuffeRL:
                 self.stats['sweep_obj_min']   = float(minR)                  # max worst-skill
                 self.stats['sweep_obj_bal']   = float(meanR - stdR)          # mean - std
                 self.stats['sweep_obj_entropy'] = float(meanR * H)           # mean × usage entropy
-                self.stats['sweep_obj_bal'] = float(meanR - stdR)
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
