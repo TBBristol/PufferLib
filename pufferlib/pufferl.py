@@ -45,6 +45,7 @@ rich.traceback.install(show_locals=False)
 
 import signal # Aggressively exit on ctrl+c
 signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
+import math
 
 # Assume advantage kernel has been built if CUDA compiler is available
 ADVANTAGE_CUDA = shutil.which("nvcc") is not None
@@ -422,9 +423,58 @@ class PuffeRL:
                 for k in range(self.num_skills):
                     mask = self.skill_ids == k
                     self.stats[f'int_return_skill_{k}'] = r_intr[mask].sum(dim=1).mean().item()
+
+
             
                 #detach?
 
+                # r_intr: [B,S] intrinsic rewards
+                # self.skill_ids: [B] skill index for each rollout
+
+                # per-trajectory return
+                traj_return = r_intr.sum(dim=1)       # [B]
+
+                num_skills = self.num_skills
+                device = r_intr.device
+
+                Rk = torch.full((num_skills,), float("nan"), device=device)  # per-skill mean returns
+                pk = torch.zeros(num_skills, device=device)                  # per-skill usage fractions
+
+                for k in range(num_skills):
+                    mask = (self.skill_ids == k)
+                    if mask.any():
+                        Rk[k] = traj_return[mask].mean()
+                        pk[k] = mask.float().mean()
+
+               
+                def nanmean(x):
+                    mask = ~torch.isnan(x)
+                    return (x[mask].mean() if mask.any() else torch.tensor(float('nan'), device=x.device))
+
+                def nanstd(x):
+                    mask = ~torch.isnan(x)
+                    return (x[mask].std(unbiased=False) if mask.any() else torch.tensor(float('nan'), device=x.device))
+
+                def nanmin(x):
+                    mask = ~torch.isnan(x)
+                    return (x[mask].min() if mask.any() else torch.tensor(float('nan'), device=x.device))
+
+                 # statistics
+                minR  = nanmin(Rk)                    # worst skill avg return
+                meanR = nanmean(Rk)                   # average across skills
+                stdR  = nanstd(Rk)    # variation
+                H     = -(pk.clamp_min(1e-8) * pk.clamp_min(1e-8).log()).sum() / math.log(num_skills)
+                # log all pieces
+                self.stats['sweep/min_return'] = float(minR)
+                self.stats['sweep/mean_return'] = float(meanR)
+                self.stats['sweep/std_return']  = float(stdR)
+                self.stats['sweep/usage_entropy'] = float(H)
+
+                # candidate sweep objectives
+                self.stats['sweep_obj_min']   = float(minR)                  # max worst-skill
+                self.stats['sweep_obj_bal']   = float(meanR - stdR)          # mean - std
+                self.stats['sweep_obj_entropy'] = float(meanR * H)           # mean × usage entropy
+                self.stats['sweep_obj_bal'] = float(meanR - stdR)
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
