@@ -199,6 +199,7 @@ class PuffeRL:
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
+        breakpoint()
 
     @property
     def uptime(self):
