@@ -283,12 +283,17 @@ class PuffeRL:
             done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
+            if self.config['turn_off_dones']:
+                d[:] = 0
+                t[:] = 0
+
             profile('eval_copy', epoch)
             o = torch.as_tensor(o)
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
 
+            
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
                 state = dict(
@@ -1074,6 +1079,12 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
+
+    if args['train']['save_traj']:
+        eval_args = copy.deepcopy(args)
+        eval_ant(env_name, args = eval_args, policy= policy,output_path=f"model_trajs/{logger.run_id}_trajectories.png")
+
+
     return all_logs
 
 
@@ -1158,6 +1169,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             frames.append('Done')
 
 def eval_ant(env_name,
+    output_path="ant_skill_trajectories.png",
     steps_per_skill=20000,
     episodes_per_skill=5,
     args=None,
@@ -1237,8 +1249,8 @@ def eval_ant(env_name,
                 xy = driver.env.unwrapped.data.qpos[0:2].copy()
                 traj.append(xy)
 
-                if t.any(): #d.any() or t.any()
-                    break
+                #if t.any(): #d.any() or t.any()
+                 #   break
 
             trajectories[skill_id].append(np.array(traj))
 
@@ -1256,8 +1268,10 @@ def eval_ant(env_name,
     plt.legend()
     plt.axis("equal")
     plt.title("Ant skill-conditioned trajectories")
-    plt.savefig("ant_skill_trajectories.png", dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     # plt.show()
+
+#ONLY FOR FOUR ROOMS BROKEN
 def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=None):
     import matplotlib.pyplot as plt
     from collections import defaultdict
@@ -1360,6 +1374,8 @@ def sweep(args=None, env_name=None):
         np.random.seed(seed)
         torch.manual_seed(seed)
         sweep.suggest(args)
+        print("Sweep run:", args['vec'])
+
         total_timesteps = args['train']['total_timesteps']
         all_logs = train(env_name, args=args)
         all_logs = [e for e in all_logs if target_key in e]
