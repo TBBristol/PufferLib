@@ -21,11 +21,12 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, lambda_lr = 1e-3):
+    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, encoder_lr= 1e-3, lambda_lr = 1e-3):
         super().__init__()
         self.hidden_size = hidden_size
         self.phi_dim = phi_dim
         self.lambda_lr = lambda_lr
+        self.encoder_lr = encoder_lr
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
@@ -89,10 +90,15 @@ class Default(nn.Module):
             pufferlib.pytorch.layer_init(nn.Linear(hidden_size, phi_dim)),
         )
 
+        #encoder optimization
+        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=self.encoder_lr)
+
         #lamda initialization
         self.log_lambda = torch.log(torch.tensor(inital_lambda))
         self.log_lambda = torch.nn.Parameter(self.log_lambda)
         self.lambda_opt = torch.optim.Adam([self.log_lambda], lr=self.lambda_lr)
+
+
 
 
     def forward_eval(self, observations, state=None):

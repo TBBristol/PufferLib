@@ -399,16 +399,16 @@ class PuffeRL:
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
                 # normalize to zero mean, unit variance per batch
-                step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
+                #step_rewards = (step_rewards - step_rewards.mean()) / (step_rewards.std() + 1e-8)
 
-                step_rewards = torch.clamp(step_rewards, -1, 1)
+                #step_rewards = torch.clamp(step_rewards, -1, 1)
                 r_intr[:,:-1] = step_rewards
 
                 self.rewards = r_intr.detach()
                 self.stats['intrinsic_return'] = r_intr.sum(dim=1).mean().item()
                 self.stats['intrinsic_step']= r_intr.mean().item()
             
-                #detach?
+                #detach becuase we dont want encoder to get ppo grads
 
 
         for mb in range(self.total_minibatches):
@@ -513,10 +513,25 @@ class PuffeRL:
 
                 te_obj =  rewards + lambda_val.detach()*constraint
                 te_loss = -te_obj.mean()
-                loss += te_loss
+                #loss += te_loss separate loss for encoder
+                
+
+                if config['use_rnn']:
+                    lambda_opt = self.policy.policy.lambda_opt
+                    encoder_opt = self.policy.policy.encoder_opt
+                else:
+                    lambda_opt = self.policy.lambda_opt
+                    encoder_opt = self.policy.encoder_opt
+                    
+                encoder_opt.zero_grad()
+                te_loss.backward()
+                encoder_opt.step()
+                
 
                 lambda_loss = (log_lambda * constraint.detach().mean())
+                lambda_opt.zero_grad()
                 lambda_loss.backward()
+                lambda_opt.step()
                
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
@@ -543,15 +558,6 @@ class PuffeRL:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-
-            if self.metra_args is not None:
-                if config['use_rnn']:
-                    lambda_opt = self.policy.policy.lambda_opt
-                else:
-                    lambda_opt = self.policy.lambda_opt
-
-                lambda_opt.step()
-                lambda_opt.zero_grad()
 
         # Reprioritize experience
         profile('train_misc', epoch)
