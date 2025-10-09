@@ -216,24 +216,32 @@ class PuffeRL:
                     )
             self.phi_dim = self.metra_args['phi_dim']
             self.num_skills = self.metra_args['num_skills']
+            self.discrete_skills = config['metra_skill_discrete']
             #eye for orthogoal skills
-            self.metra_skills = torch.eye(self.num_skills,self.phi_dim, device=self.config['device'])
 
-            #rand for random skill vects
-            #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
-            #metra skills zero mean and unit variance to make waserstein cancel nicely
+            if self.discrete_skills:
+                self.metra_skills = torch.eye(self.num_skills,self.phi_dim, device=self.config['device'])
 
-            """self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
-            self.metra_skills *= self.num_skills
-            self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)"""
+                #rand for random skill vects
+                #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
+                #metra skills zero mean and unit variance to make waserstein cancel nicely
+
+                self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
+                self.metra_skills *= self.num_skills
+                self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
 
 
-            self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
-            var = self.metra_skills.var(unbiased=False)
-            self.metra_skills = self.metra_skills / torch.sqrt(var + 1e-8)
+                """self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
+                var = self.metra_skills.var(unbiased=False)
+                self.metra_skills = self.metra_skills / torch.sqrt(var + 1e-8)"""
+            else:
+                self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
+                self.metra_skills /= torch.norm(self.metra_skills, dim=1, keepdim=True)
 
             self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=self.config['device'])
             self.epsilon = self.metra_args.get('epsilon', 1.0)
+
+
         else:
             self.metra_args = None
 
@@ -388,7 +396,6 @@ class PuffeRL:
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
-                
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
                 step_rewards = (delta_phi*z).sum(dim=-1) #B,S  Normalise to S do we need this? its not in paper
                 # normalize to zero mean, unit variance per batch
@@ -495,7 +502,7 @@ class PuffeRL:
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
                 rewards= (delta_phi*z).sum(dim=-1) #B,S-1
-                constraint = 1- (delta_phi.pow(2).sum(dim=-1)) #B,S-1 TODO paper uses mean? my shapes is diff?
+                constraint = 1- (delta_phi.pow(2).sum(dim=-1)) #B,S-1 
                 constraint = torch.clamp(constraint, max = self.epsilon)#, min = 1e-8)
 
                 if config['use_rnn']:
@@ -1082,10 +1089,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     # build skill vectors                                                                             
     d = policy.policy.phi_dim                                                                           
     num_skills = args['train']['metra_num_skills']                                                     
-    metra_skills = torch.eye(num_skills, d, device=device)                                             
-    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)                               
+    metra_skills = torch.eye(num_skills, d, device=device)
+    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
+    metra_skills *= num_skills
+    metra_skills = metra_skills / (num_skills - 1 if num_skills != 1 else 1)
+    """metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)                               
     var = metra_skills.var(unbiased=False)                                                             
-    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
+    metra_skills = metra_skills / torch.sqrt(var + 1e-8)"""
 
     state = {}
     if args['train']['use_rnn']:
@@ -1169,10 +1179,27 @@ def eval_ant(env_name,
     # build skill vectors
     d = policy.policy.phi_dim
     num_skills = args['train']['metra_num_skills']
-    metra_skills = torch.eye(num_skills, d, device=device)
-    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
-    var = metra_skills.var(unbiased=False)
-    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
+    discrete_skills = False
+
+    if discrete_skills:
+        metra_skills = torch.eye(num_skills,d, device=device)
+
+        #rand for random skill vects
+        #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
+        #metra skills zero mean and unit variance to make waserstein cancel nicely
+
+        metra_skills = metra_skills -metra_skills.mean(dim=1, keepdim=True)
+        metra_skills *= num_skills
+        metra_skills = metra_skills / (num_skills - 1 if num_skills != 1 else 1)
+
+
+        """metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
+        var = metra_skills.var(unbiased=False)
+        metra_skills = metra_skills / torch.sqrt(var + 1e-8)"""
+    else:
+        metra_skills = torch.randn(num_skills,d, device=device)
+        metra_skills /= torch.norm(metra_skills, dim=1, keepdim=True)
+
 
     trajectories = defaultdict(list)
 
@@ -1245,12 +1272,16 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
 
     d = policy.policy.phi_dim
     num_skills = args['train']['metra_num_skills']
-    metra_skills = torch.eye(num_skills, d, device=device)      
-    """metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
-    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)"""
+    metra_skills = torch.eye(num_skills, d, device=device)
     metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
-    var = metra_skills.var(unbiased=False)
-    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
+    metra_skills *= num_skills
+    metra_skills = metra_skills / (num_skills - 1 if num_skills != 1 else 1)
+
+
+
+     #metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
+    #var = metra_skills.var(unbiased=False)
+    #metra_skills = metra_skills / torch.sqrt(var + 1e-8)
  
 
     trajectories = defaultdict(list)
