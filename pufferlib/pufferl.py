@@ -1246,9 +1246,12 @@ def eval_skills(env_name, steps_per_skill = 100, args=None, vecenv=None, policy=
     d = policy.policy.phi_dim
     num_skills = args['train']['metra_num_skills']
     metra_skills = torch.eye(num_skills, d, device=device)      
-    metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
-    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)
-   
+    """metra_skills = metra_skills - metra_skills.mean(0, keepdim=True)
+    metra_skills = metra_skills / (metra_skills.std(dim=1, keepdim=True) + 1e-8)"""
+    metra_skills = metra_skills - metra_skills.mean(dim=1, keepdim=True)
+    var = metra_skills.var(unbiased=False)
+    metra_skills = metra_skills / torch.sqrt(var + 1e-8)
+ 
 
     trajectories = defaultdict(list)
 
