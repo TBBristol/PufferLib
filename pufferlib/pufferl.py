@@ -141,12 +141,34 @@ class PuffeRL:
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
             pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
-        #exclude lambda from params
-        if config['metra']:
+        #exclude lambda and encoder from params
+        """if config['metra']:
             if config['use_rnn']:
-                params = [p for n,p in self.policy.policy.named_parameters() if 'log_lambda' not in n]
+                params = [p for n,p in self.policy.policy.named_parameters() if 'log_lambda' not in n and 'phi_encoder' not in n]
             else:
-                params = [p for n,p in self.policy.named_parameters() if 'log_lambda' not in n]
+                params = [p for n,p in self.policy.named_parameters() if 'log_lambda' not in n and 'phi_encoder' not in n]"""
+
+        if config['use_rnn']:
+            all_params = list(self.policy.policy.parameters())
+            encoder_params = list(self.policy.policy.phi_encoder.parameters())
+            lambda_params = [self.policy.policy.log_lambda]
+            lambda_lr = self.policy.policy.lambda_lr
+            enc_lr = self.policy.policy.encoder_lr
+        else:
+            all_params = list(self.policy.parameters())
+            encoder_params = list(self.policy.phi_encoder.parameters())
+            lambda_params = [self.policy.log_lambda]
+            lambda_lr = self.policy.lambda_lr
+            enc_lr = self.policy.encoder_lr
+
+        excluded = set(encoder_params + lambda_params)
+        params = [p for p in all_params if p not in excluded]
+
+
+        self.lambda_opt = torch.optim.Adam(lambda_params, lr=lambda_lr)
+        self.encoder_opt = torch.optim.Adam(encoder_params, lr = enc_lr)
+
+
            
         # Optimizer
         if config['optimizer'] == 'adam':
@@ -243,6 +265,9 @@ class PuffeRL:
 
             self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=self.config['device'])
             self.epsilon = self.metra_args.get('epsilon', 1.0)
+
+           
+
 
 
         else:
@@ -397,9 +422,9 @@ class PuffeRL:
                 B,S,D = self.observations.shape
                 obs_flat = self.observations.reshape(B*S, D).float()
                 if config['use_rnn']:
-                    phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
+                    phi = self.policy.policy.phi_encoder(obs_flat).detach() #phi_enc expects B,obs_dim
                 else:
-                    phi = self.policy.phi_encoder(obs_flat)
+                    phi = self.policy.phi_encoder(obs_flat).detach()
                 #print(phi.mean().item(), phi.std().item())
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
@@ -529,27 +554,47 @@ class PuffeRL:
                 te_loss = -te_obj.mean()
                 #loss += te_loss separate loss for encoder
 
-
-
-
-
+                #if config['use_rnn']:
+                #    lambda_opt = self.policy.policy.lambda_opt
+                #    encoder_opt = self.policy.policy.encoder_opt
+                #else:
+                #    lambda_opt = self.policy.lambda_opt
+                #    encoder_opt = self.policy.encoder_opt
                
-                if config['use_rnn']:
-                    lambda_opt = self.policy.policy.lambda_opt
-                    encoder_opt = self.policy.policy.encoder_opt
-                else:
-                    lambda_opt = self.policy.lambda_opt
-                    encoder_opt = self.policy.encoder_opt
-                    
-                encoder_opt.zero_grad()
                 te_loss.backward()
-                encoder_opt.step()
-                
+                #print("=== Encoder Gradients ===")
+                #for name, param in self.policy.policy.phi_encoder.named_parameters():
+                #    if param.grad is None:
+                #        print(f"{name}: No grad")
+                #    else:
+                #        print(f"{name}: grad norm = {param.grad.norm().item():.4e}, mean = {param.grad.mean().item():.4e}")
 
+
+
+                self.encoder_opt.step()
+                self.encoder_opt.zero_grad()
+
+                #def print_grad(model):
+
+                #    for name, param in model.named_parameters():
+                #        if param.grad is not None:
+                #            print(name, param.grad.norm(), param.grad)  # view magnitude or full tensor
+                #        else:
+                #            print(name, "No grad")
+
+                #print_grad(self.policy.policy.phi_encoder)
+
+                #
+                #breakpoint()
                 lambda_loss = (log_lambda * constraint.detach().mean())
-                lambda_opt.zero_grad()
                 lambda_loss.backward()
-                lambda_opt.step()
+                self.lambda_opt.step()
+                self.lambda_opt.zero_grad()
+
+
+                #print(self.policy.policy.log_lambda.grad, self.policy.policy.log_lambda.grad.norm())
+                #breakpoint()
+
                
             self.amp_context.__enter__() # TODO: AMP needs some debugging
 
@@ -571,7 +616,20 @@ class PuffeRL:
            
             # Learn on accumulated minibatches
             profile('learn', epoch)
+
+           
             loss.backward()
+
+           # print("=== PPO Gradients ===")
+           # for name, param in self.policy.policy.named_parameters():  # if config['use_rnn']
+           #     if param.grad is None:
+           #         print(f"{name}: No grad")
+           #     else:
+           #         print(f"{name}: grad norm = {param.grad.norm().item():.4e}, mean = {param.grad.mean().item():.4e}")
+
+            #print_grad(self.policy.policy)
+
+            #breakpoint()
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 self.optimizer.step()

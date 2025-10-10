@@ -21,7 +21,7 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, encoder_lr= 3e-4, lambda_lr = 3e-5):
+    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, encoder_lr= 1e-3, lambda_lr = 3e-5):
         super().__init__()
         self.hidden_size = hidden_size
         self.phi_dim = phi_dim
@@ -91,10 +91,10 @@ class Default(nn.Module):
         )
 
         # scale only the final layer
-        with torch.no_grad():
-            self.phi_encoder[-1].weight.mul_(8.0)
-            print("Final layer mean abs weight:", self.phi_encoder[-1].weight.abs().mean().item())
-
+#        with torch.no_grad():
+#            self.phi_encoder[-1].weight.mul_(8.0)
+#            print("Final layer mean abs weight:", self.phi_encoder[-1].weight.abs().mean().item())
+#
         """for m in self.phi_encoder.modules():
             if isinstance(m, nn.Linear):
                 print(m.weight.std().item())
@@ -105,12 +105,12 @@ class Default(nn.Module):
 
 
         #encoder optimization
-        self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=self.encoder_lr)
+        #self.encoder_opt = torch.optim.Adam(self.phi_encoder.parameters(), lr=self.encoder_lr)
 
         #lamda initialization
         self.log_lambda = torch.log(torch.tensor(inital_lambda))
         self.log_lambda = torch.nn.Parameter(self.log_lambda)
-        self.lambda_opt = torch.optim.Adam([self.log_lambda], lr=self.lambda_lr)
+        #self.lambda_opt = torch.optim.Adam([self.log_lambda], lr=self.lambda_lr)
 
 
 
