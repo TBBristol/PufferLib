@@ -21,6 +21,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 import psutil
+import copy
 
 import torch
 import torch.distributed
@@ -225,10 +226,12 @@ class PuffeRL:
                 #rand for random skill vects
                 #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
                 #metra skills zero mean and unit variance to make waserstein cancel nicely
-
-                self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
-                self.metra_skills *= self.num_skills
-                self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
+                self.metra_skills = torch.eye(self.num_skills, self.phi_dim, device=self.config['device'])
+                self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
+                self.metra_skills = self.metra_skills * (self.num_skills / (self.num_skills - 1))
+                #self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
+                #self.metra_skills *= self.num_skills
+                #self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
 
 
                 """self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
@@ -397,6 +400,7 @@ class PuffeRL:
                     phi = self.policy.policy.phi_encoder(obs_flat) #phi_enc expects B,obs_dim
                 else:
                     phi = self.policy.phi_encoder(obs_flat)
+                #print(phi.mean().item(), phi.std().item())
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
@@ -412,7 +416,8 @@ class PuffeRL:
                 self.rewards = r_intr.detach()
                 self.stats['intrinsic_return'] = r_intr.sum(dim=1).mean().item()
                 self.stats['intrinsic_step']= r_intr.mean().item()
-            
+                self.stats['intrinsic_reward_std'] = r_intr.std().item()
+                            
                 #detach becuase we dont want encoder to get ppo grads
 
 
@@ -456,7 +461,11 @@ class PuffeRL:
                 lstm_c=None,
             )
             if self.metra_args is not None:
-                state['skill'] = mb_skills.reshape(-1, self.num_skills)
+                state['skill'] = mb_skills.reshape(-1, self.phi_dim)
+
+
+
+
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
             profile('train_misc', epoch)
@@ -519,8 +528,12 @@ class PuffeRL:
                 te_obj =  rewards + lambda_val.detach()*constraint
                 te_loss = -te_obj.mean()
                 #loss += te_loss separate loss for encoder
-                
 
+
+
+
+
+               
                 if config['use_rnn']:
                     lambda_opt = self.policy.policy.lambda_opt
                     encoder_opt = self.policy.policy.encoder_opt

@@ -21,7 +21,7 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, encoder_lr= 1e-3, lambda_lr = 1e-3):
+    def __init__(self, env, hidden_size=128, phi_dim=2, inital_lambda = 30.0, encoder_lr= 3e-4, lambda_lr = 3e-5):
         super().__init__()
         self.hidden_size = hidden_size
         self.phi_dim = phi_dim
@@ -84,11 +84,25 @@ class Default(nn.Module):
 
         self.phi_encoder = torch.nn.Sequential(
             pufferlib.pytorch.layer_init(nn.Linear(phi_input_size, hidden_size)),
-            nn.GELU(),
+            nn.ReLU(),
             pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-            nn.GELU(),
+            nn.ReLU(),
             pufferlib.pytorch.layer_init(nn.Linear(hidden_size, phi_dim)),
         )
+
+        # scale only the final layer
+        with torch.no_grad():
+            self.phi_encoder[-1].weight.mul_(8.0)
+            print("Final layer mean abs weight:", self.phi_encoder[-1].weight.abs().mean().item())
+
+        """for m in self.phi_encoder.modules():
+            if isinstance(m, nn.Linear):
+                print(m.weight.std().item())
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+                print(f"new {m.weight.std().item()}")"""
+
+
 
         #encoder optimization
         self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=self.encoder_lr)
