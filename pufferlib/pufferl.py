@@ -428,6 +428,7 @@ class PuffeRL:
                 #print(phi.mean().item(), phi.std().item())
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                delta_phi = delta_phi/delta_phi.norm(dim=-1, keepdim=True)
                 z = self.metra_skills[self.skill_ids] #B,skill_dim
                 z = z.unsqueeze(1).expand(-1,S-1,-1) #B,S-1,skill_dim
                 r_intr = torch.zeros_like(self.rewards, device=device) #B,S
@@ -538,6 +539,7 @@ class PuffeRL:
                     phi = self.policy.phi_encoder(obs_flat)
                 phi = phi.reshape(B,S,-1 ) #B,S,D
                 delta_phi = phi[:,1:,:] - phi[:,:-1,:] #B,S-1,D
+                delta_phi = delta_phi/delta_phi.norm(dim=-1, keepdim=True)
                 z = mb_skills[:,:-1,:] #B,skill_dim
 
                 rewards= (delta_phi*z).sum(dim=-1) #B,S-1
