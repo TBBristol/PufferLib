@@ -465,7 +465,6 @@ class PuffeRL:
             mb_advantages = advantages[idx]
             mb_tail_obs = self.tail_obs[idx]
             mb_skills = self.skills[self.skill_ids[idx]] #B,D dont unsqeeze here as it will break the reward passes
-
             B,S,D = mb_obs.shape
             mb_skills_flat = mb_skills.unsqueeze(1).expand(B, S, self.skill_dim).reshape(-1, self.skill_dim) #B*S,D
 
@@ -486,17 +485,18 @@ class PuffeRL:
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
 
             #update te
-            mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills.unsqueeze(1)) 
+            mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills.unsqueeze(1))
             dual_lam = self.dual_lam.exp()  ##check me vs theirs
             phi_x = phi_encoded[:,:-1,:] #B, S-1, D
             phi_y = phi_encoded[:,1:,:]
             cst_dist = 1
             inside_l2 = phi_y - phi_x
-            cst_penalty = torch.square(inside_l2).sum(dim = -1)
+            cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
+            self.stats['cst_pen_pre_clamp'] = cst_penalty.mean()
             cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
-            
+            breakpoint()
             self.opt_phi.zero_grad()
             loss_te.backward()
             self.opt_phi.step()
@@ -504,14 +504,16 @@ class PuffeRL:
 
             #update lambda
             log_dual_lam = self.dual_lam #check this
-            loss_dual_lam = log_dual_lam * (cst_penalty.detach()).mean()
+            loss_dual_lam =  log_dual_lam * (cst_penalty.detach()).mean()
 
             self.opt_lambda.zero_grad()
             loss_dual_lam.backward()
             self.opt_lambda.step()
             self.stats['dual_lam'] = self.dual_lam.exp().item()
             self.stats['loss_dual_lam'] = loss_dual_lam.item()
-
+            self.stats['cst_penalty'] = cst_penalty.mean().item()
+            self.stats['loss_te'] = loss_te.item()
+            self.stats['inside_l2'] = inside_l2.mean().item()
 
             #update rewards with new phi adn lambda for updating policy
             phi_encoded = self.phi_encoder(mb_obs)
