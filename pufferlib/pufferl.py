@@ -31,6 +31,7 @@ import pufferlib
 import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
+
 try:
     from pufferlib import _C
 except ImportError:
@@ -88,7 +89,7 @@ class PuffeRL:
 
         device = config['device']
         self.observations = torch.zeros(segments, horizon, *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            dtype=torch.float32,
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
         self.actions = torch.zeros(segments, horizon, *atn_space.shape, device=device,
@@ -140,6 +141,24 @@ class PuffeRL:
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
             pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
+        #Set up phi encoder and lambda 
+        from pufferlib.models import Phi_Encoder
+        self.phi_encoder = Phi_Encoder(*obs_space.shape, 
+                                       hidden_dim=config['phi_hidden'], 
+                                       output_dim=config['skill_dim'])
+        #dual_lam = ParameterModule(torch.Tensor([np.log(args.dual_lam)]))
+        self.dual_lam = torch.nn.Parameter(torch.Tensor([np.log(config['inital_lambda'])]))
+
+        self.opt_phi = torch.optim.Adam(self.phi_encoder.parameters(),
+                                        lr = config['lr_phi'])
+        self.opt_lambda = torch.optim.Adam([self.dual_lam],
+                                           lr = config['lr_lambda'])
+        self.dual_slack = config['dual_slack']
+
+        self.tail_obs = torch.zeros(total_agents, *obs_space.shape, device=device, dtype = torch.float32)
+
+
+
         # Optimizer
         if config['optimizer'] == 'adam':
             optimizer = torch.optim.Adam(
@@ -163,6 +182,35 @@ class PuffeRL:
             raise ValueError(f'Unknown optimizer: {config["optimizer"]}')
 
         self.optimizer = optimizer
+
+        #Set up skills
+        self.num_skills = config['num_skills']
+        self.skill_dim = config['skill_dim']
+        if config['disc_skill']:
+            self.skills = torch.eye(self.num_skills,self.skill_dim, device=config['device'])
+
+            #rand for random skill vects
+            #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
+            #metra skills zero mean and unit variance to make waserstein cancel nicely
+            self.skills = torch.eye(self.num_skills, self.skill_dim, device=device)
+            self.skills = self.skills - self.skills.mean(dim=1, keepdim=True)
+            self.skills = self.skills * (self.num_skills / (self.num_skills - 1))
+            #self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
+            #self.metra_skills *= self.num_skills
+            #self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
+
+
+            """self.metra_skills = self.metra_skills - self.metra_skills.mean(dim=1, keepdim=True)
+            var = self.metra_skills.var(unbiased=False)
+            self.metra_skills = self.metra_skills / torch.sqrt(var + 1e-8)"""
+        else:
+            self.skills = torch.randn(self.num_skills,self.skill_dim, device=device)
+            self.skills /= torch.norm(self.skills, dim=1, keepdim=True)
+
+        self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=device)
+
+        self.dual_slack = config['dual_slack']
+        
 
         # Logging
         self.logger = logger
@@ -225,22 +273,31 @@ class PuffeRL:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
 
+        need_tail = torch.zeros(self.total_agents, dtype=torch.bool, device='cpu')
+
         self.full_rows = 0
-        while self.full_rows < self.segments:
+        while self.full_rows < self.segments or need_tail.any():
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-
+            
             profile('eval_misc', epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
 
+            
             done_mask = d + t # TODO: Handle truncations separately
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
-            o = torch.as_tensor(o)
-            o_device = o.to(device)#, non_blocking=True)
-            r = torch.as_tensor(r).to(device)#, non_blocking=True)
-            d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            o = torch.as_tensor(o).to(torch.float32)
+            o_device = o.to(device).to(torch.float32)
+            r = torch.as_tensor(r).to(device)
+            d = torch.as_tensor(d).to(device)
+            pending = need_tail[env_id]
+            if pending.any():
+                idx = torch.arange(env_id.start, env_id.stop)[pending]
+                self.tail_obs[idx] = o_device[pending].to(self.tail_obs.dtype).detach().clone()
+                need_tail[idx] = False
+
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
@@ -250,6 +307,10 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask,
                 )
+
+                skill_id = self.skill_ids[env_id]
+                skill = self.skills[skill_id]
+                state['skill'] = skill
 
                 if config['use_rnn']:
                     state['lstm_h'] = self.lstm_h[env_id.start]
@@ -265,29 +326,38 @@ class PuffeRL:
                     self.lstm_h[env_id.start] = state['lstm_h']
                     self.lstm_c[env_id.start] = state['lstm_c']
 
-                # Fast path for fully vectorized envs
-                l = self.ep_lengths[env_id.start].item()
-                batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+                if self.full_rows < self.segments:
 
-                if config['cpu_offload']:
-                    self.observations[batch_rows, l] = o
+                    # Fast path for fully vectorized envs
+                    l = self.ep_lengths[env_id.start].item()
+                    batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+
+                    if config['cpu_offload']:
+                        self.observations[batch_rows, l] = o
+                    else:
+                        self.observations[batch_rows, l] = o_device
+
+                    self.actions[batch_rows, l] = action
+                    self.logprobs[batch_rows, l] = logprob
+                    self.rewards[batch_rows, l] = r
+                    self.terminals[batch_rows, l] = d.float()
+                    self.values[batch_rows, l] = value.flatten()
+
+                    # Note: We are not yet handling masks in this version
+                    self.ep_lengths[env_id] += 1
+                    if l+1 >= config['bptt_horizon']:
+                        num_full = env_id.stop - env_id.start
+                        self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
+                        self.ep_lengths[env_id] = 0
+                        self.free_idx += num_full
+                        self.full_rows += num_full
+
+                    need_tail[env_id] = True
                 else:
-                    self.observations[batch_rows, l] = o_device
+                    pass
 
-                self.actions[batch_rows, l] = action
-                self.logprobs[batch_rows, l] = logprob
-                self.rewards[batch_rows, l] = r
-                self.terminals[batch_rows, l] = d.float()
-                self.values[batch_rows, l] = value.flatten()
 
-                # Note: We are not yet handling masks in this version
-                self.ep_lengths[env_id] += 1
-                if l+1 >= config['bptt_horizon']:
-                    num_full = env_id.stop - env_id.start
-                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
-                    self.ep_lengths[env_id] = 0
-                    self.free_idx += num_full
-                    self.full_rows += num_full
+
 
                 action = action.cpu().numpy()
                 if isinstance(logits, torch.distributions.Normal):
@@ -313,7 +383,25 @@ class PuffeRL:
         profile.end()
         return self.stats
 
-    @record
+    #zerograd
+    #backward
+    #step
+    
+    #opts te - te loss, descent, lambda loss, lmabds descent
+    #update rew
+    #opt policy
+
+    #consider repalceing rewad in eval it might just be simpler
+
+    def _update_rewards_mb(self, mb_phi_encoded_obs, mb_skills):
+        curr_z = mb_phi_encoded_obs[:,:-1,:] #B,S+1,D
+        next_z = mb_phi_encoded_obs[:,1:,:] #B,S+1,D
+        target_z = next_z - curr_z
+        rewards = (target_z *mb_skills).sum(dim = -1) #B, S
+        return rewards
+
+    
+
     def train(self):
         profile = self.profile
         epoch = self.epoch
@@ -328,6 +416,26 @@ class PuffeRL:
         vf_clip = config['vf_clip_coef']
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
+        
+        with torch.no_grad():
+            #calculate inital rewards intrisically
+            phi_encoded = self.phi_encoder(self.observations)
+            phi_encoded_tail = self.phi_encoder(self.tail_obs).unsqueeze(1)
+            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim=1) #b,s+1,d
+            skills = self.skills[self.skill_ids].unsqueeze(1) #B,1,D
+            rewards = self._update_rewards_mb(phi_encoded, skills)
+            self.stats['PureRewardMean'] = rewards.mean()
+            self.stats['PureRewardStd'] = rewards.std()
+            self.stats['ObsMean'] = self.observations.mean()
+            self.stats['ObsNorm'] = self.observations.norm()
+            self.stats['ObsStd'] = self.observations.std()
+            self.stats['phi_mean'] = phi_encoded.mean()
+            self.stats['phi_std'] = phi_encoded.std()
+            self.stats['phi_norm'] = phi_encoded.norm()
+            self.rewards[:,:] = rewards
+
+
+
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
@@ -355,6 +463,11 @@ class PuffeRL:
             mb_values = self.values[idx]
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
+            mb_tail_obs = self.tail_obs[idx]
+            mb_skills = self.skills[self.skill_ids[idx]] #B,D dont unsqeeze here as it will break the reward passes
+
+            B,S,D = mb_obs.shape
+            mb_skills_flat = mb_skills.unsqueeze(1).expand(B, S, self.skill_dim).reshape(-1, self.skill_dim) #B*S,D
 
             profile('train_forward', epoch)
             if not config['use_rnn']:
@@ -365,6 +478,46 @@ class PuffeRL:
                 lstm_h=None,
                 lstm_c=None,
             )
+
+            state['skill'] = mb_skills_flat 
+
+            phi_encoded = self.phi_encoder(mb_obs)
+            phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
+            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
+
+            #update te
+            mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills.unsqueeze(1)) 
+            dual_lam = self.dual_lam.exp()  ##check me vs theirs
+            phi_x = phi_encoded[:,:-1,:] #B, S-1, D
+            phi_y = phi_encoded[:,1:,:]
+            cst_dist = 1
+            inside_l2 = phi_y - phi_x
+            cst_penalty = torch.square(inside_l2).sum(dim = -1)
+            cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
+            te_obj = mb_rewards + dual_lam.detach() * cst_penalty
+            loss_te = -te_obj.mean()
+            
+            self.opt_phi.zero_grad()
+            loss_te.backward()
+            self.opt_phi.step()
+
+
+            #update lambda
+            log_dual_lam = self.dual_lam #check this
+            loss_dual_lam = log_dual_lam * (cst_penalty.detach()).mean()
+
+            self.opt_lambda.zero_grad()
+            loss_dual_lam.backward()
+            self.opt_lambda.step()
+            self.stats['dual_lam'] = self.dual_lam.exp().item()
+            self.stats['loss_dual_lam'] = loss_dual_lam.item()
+
+
+            #update rewards with new phi adn lambda for updating policy
+            phi_encoded = self.phi_encoder(mb_obs)
+            phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
+            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
+            mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills.unsqueeze(1))
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -384,7 +537,6 @@ class PuffeRL:
             adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
-            adv = mb_advantages
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
 
             # Losses

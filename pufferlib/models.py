@@ -9,6 +9,25 @@ import pufferlib.pytorch
 import pufferlib.spaces
 
 
+class Phi_Encoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, output_dim)
+        self.phi_encoder = torch.nn.Sequential(
+                                         pufferlib.pytorch.layer_init((self.fc1)),
+                                         nn.ReLU(),
+                                         pufferlib.pytorch.layer_init((self.fc2)),
+                                         nn.ReLU(),
+                                         pufferlib.pytorch.layer_init((self.fc3)))
+
+    def forward(self, x):
+        return self.phi_encoder(x)
+                                         
+
+
+                             
 class Default(nn.Module):
     '''Default PyTorch policy. Flattens obs and applies a linear layer.
 
@@ -21,8 +40,10 @@ class Default(nn.Module):
     the recurrent cell into encode_observations and put everything after
     into decode_actions.
     '''
-    def __init__(self, env, hidden_size=128):
+    def __init__(self, env, skill_dim = None, hidden_size=128):
         super().__init__()
+        assert skill_dim is not None
+        self.skill_dim = skill_dim
         self.hidden_size = hidden_size
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -36,11 +57,11 @@ class Default(nn.Module):
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
             input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
-            self.encoder = nn.Linear(input_size, self.hidden_size)
+            self.encoder = nn.Linear(input_size + self.skill_dim, self.hidden_size)
         else:
             num_obs = np.prod(env.single_observation_space.shape)
             self.encoder = torch.nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
+                pufferlib.pytorch.layer_init(nn.Linear(num_obs+self.skill_dim, hidden_size)),
                 nn.GELU(),
             )
             
@@ -74,6 +95,9 @@ class Default(nn.Module):
         '''Encodes a batch of observations into hidden states. Assumes
         no time dimension (handled by LSTM wrappers).'''
         batch_size = observations.shape[0]
+        skills = state['skill']
+        assert skills.shape[0] == observations.shape[0]
+        observations = torch.cat([observations, skills], dim=-1)
         if self.is_dict_obs:
             observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
