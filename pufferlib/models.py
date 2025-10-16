@@ -12,6 +12,9 @@ import pufferlib.spaces
 class Phi_Encoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super().__init__()
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, output_dim)
