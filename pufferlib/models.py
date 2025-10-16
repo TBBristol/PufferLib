@@ -17,9 +17,9 @@ class Phi_Encoder(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, output_dim)
         self.phi_encoder = torch.nn.Sequential(
                                          pufferlib.pytorch.layer_init((self.fc1)),
-                                         nn.ReLU(),
+                                         nn.GELU(),
                                          pufferlib.pytorch.layer_init((self.fc2)),
-                                         nn.ReLU(),
+                                         nn.GELU(),
                                          pufferlib.pytorch.layer_init((self.fc3)))
 
     def forward(self, x):

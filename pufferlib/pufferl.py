@@ -210,6 +210,7 @@ class PuffeRL:
         self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=device)
 
         self.dual_slack = config['dual_slack']
+        self.intrinsic_reward_scaling = config['intrinsic_reward_scaling']
         
 
         # Logging
@@ -391,14 +392,13 @@ class PuffeRL:
     #update rew
     #opt policy
 
-    #consider repalceing rewad in eval it might just be simpler
 
     def _update_rewards_mb(self, mb_phi_encoded_obs, mb_skills):
         curr_z = mb_phi_encoded_obs[:,:-1,:] #B,S+1,D
         next_z = mb_phi_encoded_obs[:,1:,:] #B,S+1,D
         target_z = next_z - curr_z
         rewards = (target_z *mb_skills).sum(dim = -1) #B, S
-        return rewards
+        return self.intrinsic_reward_scaling*rewards
 
     
 
@@ -424,16 +424,23 @@ class PuffeRL:
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim=1) #b,s+1,d
             skills = self.skills[self.skill_ids].unsqueeze(1) #B,1,D
             rewards = self._update_rewards_mb(phi_encoded, skills)
-            self.stats['PureRewardMean'] = rewards.mean()
-            self.stats['PureRewardStd'] = rewards.std()
-            self.stats['ObsMean'] = self.observations.mean()
-            self.stats['ObsNorm'] = self.observations.norm()
-            self.stats['ObsStd'] = self.observations.std()
-            self.stats['phi_mean'] = phi_encoded.mean()
-            self.stats['phi_std'] = phi_encoded.std()
-            self.stats['phi_norm'] = phi_encoded.norm()
+
             self.rewards[:,:] = rewards
 
+            self.stats['PureRewardMean'] = rewards.mean()
+            self.stats['PureRewardStd'] = rewards.std()
+          
+            phi_l2 = torch.linalg.vector_norm(phi_encoded, dim=-1)
+            self.stats['phi_dim'] = phi_encoded.size(-1)
+            self.stats['phi_l2_mean'] = phi_l2.mean().item()
+            self.stats['phi_l2_std'] = phi_l2.std().item()
+            
+
+            self.stats['obs_dim'] = self.observations.size(-1)
+            obs_l2 = torch.linalg.vector_norm(self.observations, ord=2, dim=-1)
+            self.stats['obs_l2'] = obs_l2.mean().item()
+
+            self.stats['intrinsic_reward_scaling'] = self.intrinsic_reward_scaling
 
 
 
@@ -496,9 +503,16 @@ class PuffeRL:
             cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
-            breakpoint()
+            
             self.opt_phi.zero_grad()
             loss_te.backward()
+            #print("=== Encoder Gradients ===")
+            for name, param in self.phi_encoder.named_parameters():
+                if param.grad is None:
+                    self.stats[f'Enc grad : {name}'] = 0.0
+                else:
+                    self.stats[f'Enc grad : {name}'] = param.grad.detach().norm().item()
+
             self.opt_phi.step()
 
 
@@ -519,7 +533,7 @@ class PuffeRL:
             phi_encoded = self.phi_encoder(mb_obs)
             phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
-            mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills.unsqueeze(1))
+            mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills.unsqueeze(1)).detach() ##CHECK THIS
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -573,6 +587,14 @@ class PuffeRL:
             # Learn on accumulated minibatches
             profile('learn', epoch)
             loss.backward()
+            #print("=== Policy Gradients ===")
+            for name, param in self.policy.named_parameters():
+                if param.grad is None:
+                    self.stats[f'Policy grad : {name}'] = 0.0
+                else:
+                    self.stats[f'Policy grad : {name}'] = param.grad.detach().norm().item()
+
+
             if (mb + 1) % self.accumulate_minibatches == 0:
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
                 self.optimizer.step()

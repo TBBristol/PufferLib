@@ -12,13 +12,13 @@ import pufferlib.environments
 
 
 def single_env_creator(env_name, capture_video, gamma,
-        run_name=None, idx=None, obs_norm=True, pufferl=False, render_mode='rgb_array', buf=None, seed=0):
+        run_name=None, idx=None, obs_norm=True, pufferl=False, render_mode='rgb_array', buf=None, seed=0, **train_kwargs):
     if capture_video and idx == 0:
         assert run_name is not None, "run_name must be specified when capturing videos"
         env = gymnasium.make(env_name, render_mode="rgb_array")
         env = gymnasium.wrappers.RecordVideo(env, f"videos/{run_name}")
     else:
-        env = gymnasium.make(env_name, render_mode=render_mode)
+        env = gymnasium.make(env_name, render_mode=render_mode, **train_kwargs)
 
     env = pufferlib.ClipAction(env)  # NOTE: this changed actions space
     env = pufferlib.EpisodeStats(env)
