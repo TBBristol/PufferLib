@@ -442,18 +442,18 @@ class PuffeRL:
 
             self.rewards[:,:] = rewards
 
-            self.stats['PureRewardMean'] = rewards.mean()
-            self.stats['PureRewardStd'] = rewards.std()
+            self.stats['PureRewardMean'] = rewards.mean().detach().cpu().item()
+            self.stats['PureRewardStd'] = rewards.std().detach().cpu().item()
           
             phi_l2 = torch.linalg.vector_norm(phi_encoded, dim=-1)
             self.stats['phi_dim'] = phi_encoded.size(-1)
-            self.stats['phi_l2_mean'] = phi_l2.mean().item()
-            self.stats['phi_l2_std'] = phi_l2.std().item()
+            self.stats['phi_l2_mean'] = phi_l2.mean().detach().cpu().item()
+            self.stats['phi_l2_std'] = phi_l2.std().detach().cpu().item()
             
 
             self.stats['obs_dim'] = self.observations.size(-1)
             obs_l2 = torch.linalg.vector_norm(self.observations, ord=2, dim=-1)
-            self.stats['obs_l2'] = obs_l2.mean().item()
+            self.stats['obs_l2'] = obs_l2.mean().detach().cpu().item()
 
             self.stats['intrinsic_reward_scaling'] = self.intrinsic_reward_scaling
 
@@ -521,7 +521,7 @@ class PuffeRL:
             cst_dist = 1
             inside_l2 = phi_y - phi_x
             cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
-            self.stats['cst_pen_pre_clamp'] = cst_penalty.mean()
+            self.stats['cst_pen_pre_clamp'] = cst_penalty.mean().detach().cpu().item()
             cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
@@ -546,14 +546,14 @@ class PuffeRL:
             loss_dual_lam.backward()
             self.opt_lambda.step()
 
-            self.stats['dual_lam'] = self.dual_lam.exp().item()
-            self.stats['loss_dual_lam'] = loss_dual_lam.item()
-            self.stats['cst_penalty'] = cst_penalty.mean().item()
-            self.stats['loss_te'] = loss_te.item()
+            self.stats['dual_lam'] = self.dual_lam.exp().detach().cpu().item()
+            self.stats['loss_dual_lam'] = loss_dual_lam.detach().cpu().item()
+            self.stats['cst_penalty'] = cst_penalty.mean().detach().cpu().item()
+            self.stats['loss_te'] = loss_te.detach().cpu().item()
             delta_phi2 = inside_l2.pow(2).sum(dim = -1)
-            self.stats['delta_phi2_mean'] = delta_phi2.mean().item()
-            self.stats['delta_phi_mean'] = delta_phi2.sqrt().mean().item()
-            self.stats['delta_phi_abs_mean'] = inside_l2.abs().mean().item()  
+            self.stats['delta_phi2_mean'] = delta_phi2.mean().detach().cpu().item()
+            self.stats['delta_phi_mean'] = delta_phi2.sqrt().mean().detach().cpu().item()
+            self.stats['delta_phi_abs_mean'] = inside_l2.abs().mean().detach().cpu().item()
             
 
             #update rewards with new phi adn lambda for updating policy
