@@ -149,9 +149,8 @@ class PuffeRL:
 
         self.phi_encoder.to(device)
         #dual_lam = ParameterModule(torch.Tensor([np.log(args.dual_lam)]))
-        self.dual_lam = torch.nn.Parameter(torch.Tensor([np.log(config['inital_lambda'])]))
-        self.dual_lam.to(device)
-
+        self.dual_lam = torch.nn.Parameter(torch.tensor([np.log(config['inital_lambda'])], dtype=torch.float32, device=config['device'])
+)
         self.opt_phi = torch.optim.Adam(self.phi_encoder.parameters(),
                                         lr = config['lr_phi'])
         self.opt_lambda = torch.optim.Adam([self.dual_lam],
