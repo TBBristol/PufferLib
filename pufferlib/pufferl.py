@@ -413,6 +413,10 @@ class PuffeRL:
         next_z = mb_phi_encoded_obs[:,1:,:] #B,S+1,D
         target_z = next_z - curr_z
         rewards = (target_z *mb_skills).sum(dim = -1) #B, S
+        #clunky way to get this so I can log it withput returning it
+        z= mb_skills.expand_as(target_z)
+        cos_align = torch.nn.functional.cosine_similarity(target_z, z, dim=-1)
+        self.alignment = cos_align.detach().cpu()
         return self.intrinsic_reward_scaling*rewards
 
     
@@ -444,6 +448,8 @@ class PuffeRL:
 
             self.stats['PureRewardMean'] = rewards.mean().detach().cpu().item()
             self.stats['PureRewardStd'] = rewards.std().detach().cpu().item()
+            self.stats['Cos_align'] = self.alignment.mean().item()
+            self.stats['Cos_align_std'] = self.alignment.std().item()
           
             phi_l2 = torch.linalg.vector_norm(phi_encoded, dim=-1)
             self.stats['phi_dim'] = phi_encoded.size(-1)
