@@ -209,8 +209,9 @@ class PuffeRL:
             self.skills = torch.randn(self.num_skills,self.skill_dim, device=device)
             self.skills /= torch.norm(self.skills, dim=1, keepdim=True)
 
-        self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=device).long()
-        self.row_skill_ids = torch.empty(self.segments, dtype=torch.long, device=device)
+         #self.skill_ids = torch.randint(0,self.num_skills, (self.total_agents,), device=device).long()
+        self.curr_skill_id = torch.randint(0,self.num_skills, (self.total_agents,), device=device).long()
+        self.row_skill_ids = torch.full((self.segments,horizon), -1, dtype=torch.long, device=device)
 
         self.dual_slack = config['dual_slack']
         self.intrinsic_reward_scaling = config['intrinsic_reward_scaling']
@@ -298,6 +299,16 @@ class PuffeRL:
             o_device = o.to(device).to(torch.float32)
             r = torch.as_tensor(r).to(device)
             d = torch.as_tensor(d).to(device)
+            t = torch.as_tensor(t).to(device)
+
+            done_mask = (d.bool() | t.bool())
+            if done_mask.any():
+                n_done = int(done_mask.sum().item())
+                new_ids = torch.randint(0, self.num_skills, (n_done,), device=device).long()
+                local_idx = self.curr_skill_id[env_id]
+                local_idx[done_mask] = new_ids
+                self.curr_skill_id[env_id] = local_idx
+
 
             pending = self.pending_tails[env_id]
             mask_pending = pending >= 0
@@ -318,7 +329,7 @@ class PuffeRL:
                     mask=mask,
                 )
 
-                skill_id = self.skill_ids[env_id]
+                skill_id = self.curr_skill_id[env_id]
                 skill = self.skills[skill_id]
                 state['skill'] = skill
 
@@ -352,6 +363,7 @@ class PuffeRL:
                     self.rewards[batch_rows, l] = r
                     self.terminals[batch_rows, l] = d.float()
                     self.values[batch_rows, l] = value.flatten()
+                    self.row_skill_ids[batch_rows, l] = self.curr_skill_id[env_id]
 
                     # Note: We are not yet handling masks in this version
                     self.ep_lengths[env_id] += 1
@@ -359,19 +371,15 @@ class PuffeRL:
 
                         prev_rows = self.ep_indices[env_id].to(torch.long)
                         self.pending_tails[env_id] = prev_rows
-                        self.row_skill_ids[prev_rows] = self.skill_ids[env_id]
 
                         num_full = env_id.stop - env_id.start
                         self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
                         self.ep_lengths[env_id] = 0
                         self.free_idx += num_full
                         self.full_rows += num_full
+                        
 
-                        # NEW: resample skills for the next trajectory of these envs
-                        self.skill_ids[env_id] = torch.randint(
-                            0, self.num_skills, (num_full,), device=config['device']
-                        ).long()
-
+                        
 
 
 
@@ -407,6 +415,8 @@ class PuffeRL:
     #update rew
     #opt policy
 
+    #TODO do we need to reset lstm on terminal?
+
 
     def _update_rewards_mb(self, mb_phi_encoded_obs, mb_skills):
         curr_z = mb_phi_encoded_obs[:,:-1,:] #B,S+1,D
@@ -441,7 +451,7 @@ class PuffeRL:
             phi_encoded = self.phi_encoder(self.observations)
             phi_encoded_tail = self.phi_encoder(self.tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim=1) #b,s+1,d
-            skills = self.skills[self.row_skill_ids].unsqueeze(1) #B,1,D
+            skills = self.skills[self.row_skill_ids] 
             rewards = self._update_rewards_mb(phi_encoded, skills)
 
             self.rewards[:,:] = rewards
@@ -494,10 +504,9 @@ class PuffeRL:
             mb_returns = advantages[idx] + mb_values
             mb_advantages = advantages[idx]
             mb_tail_obs = self.tail_obs[idx]
-            mb_skills = self.skills[self.row_skill_ids[idx]] #B,D dont unsqeeze here as it will break the reward passes
+            mb_skills = self.skills[self.row_skill_ids[idx]] #B,S,D dont unsqeeze here as it will break the reward passes
             B,S,D = mb_obs.shape
-            mb_skills_flat = mb_skills.unsqueeze(1).expand(B, S, self.skill_dim).reshape(-1, self.skill_dim) #B*S,D
-
+            mb_skills_flat = mb_skills.reshape(-1, self.skill_dim) #B*S,D
             
 
             profile('train_forward', epoch)
@@ -513,14 +522,14 @@ class PuffeRL:
             state['skill'] = mb_skills_flat 
 
             phi_encoded = self.phi_encoder(mb_obs)
-            phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
-            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
+            phi_encoded_tail = self.phi_encoder(mb_tail_obs)
+            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail.unsqueeze(1)], dim =1)
             
             
             assert phi_encoded.dim() == 3 and phi_encoded.shape == (B, S+1, self.phi_encoder.output_dim)
 
             #update te
-            mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills.unsqueeze(1))
+            mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills)
             dual_lam = self.dual_lam.exp()  ##check me vs theirs
             phi_x = phi_encoded[:,:-1,:] #B, S-1, D
             phi_y = phi_encoded[:,1:,:]
@@ -566,7 +575,7 @@ class PuffeRL:
             phi_encoded = self.phi_encoder(mb_obs)
             phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
-            mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills.unsqueeze(1)).detach() ##CHECK THIS
+            mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills).detach() ##CHECK THIS
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
