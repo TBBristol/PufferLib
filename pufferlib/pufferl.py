@@ -1067,6 +1067,7 @@ class NeptuneLogger:
 class WandbLogger:
     def __init__(self, args, load_id=None, resume='allow'):
         import wandb
+        import requests
         wandb.init(
             id=load_id or wandb.util.generate_id(),
             project=args['wandb_project'],
@@ -1081,7 +1082,12 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        self.wandb.log(logs, step=step)
+        try:
+           requests.get("https://api.wandb.ai", timeout=2)
+           self.wandb.log(logs, step=step)
+        except:
+            pass
+
 
     def close(self, model_path):
         artifact = self.wandb.Artifact(self.run_id, type='model')
