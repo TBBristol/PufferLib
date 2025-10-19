@@ -456,22 +456,22 @@ class PuffeRL:
 
             self.rewards[:,:] = rewards
 
-            self.stats['PureRewardMean'] = rewards.mean().detach().cpu().item()
-            self.stats['PureRewardStd'] = rewards.std().detach().cpu().item()
-            self.stats['Cos_align'] = self.alignment.mean().item()
-            self.stats['Cos_align_std'] = self.alignment.std().item()
+            self.stats['PureRewardMean'].append(rewards.mean().detach().cpu().item())
+            self.stats['PureRewardStd'].append(rewards.std().detach().cpu().item())
+            self.stats['Cos_align'].append(self.alignment.mean().item())
+            self.stats['Cos_align_std'].append(self.alignment.std().item())
           
             phi_l2 = torch.linalg.vector_norm(phi_encoded, dim=-1)
-            self.stats['phi_dim'] = phi_encoded.size(-1)
-            self.stats['phi_l2_mean'] = phi_l2.mean().detach().cpu().item()
-            self.stats['phi_l2_std'] = phi_l2.std().detach().cpu().item()
+            self.stats['phi_dim'].append(phi_encoded.size(-1))
+            self.stats['phi_l2_mean'].append(phi_l2.mean().detach().cpu().item())
+            self.stats['phi_l2_std'].append(phi_l2.std().detach().cpu().item())
             
 
-            self.stats['obs_dim'] = self.observations.size(-1)
+            self.stats['obs_dim'].append(self.observations.size(-1))
             obs_l2 = torch.linalg.vector_norm(self.observations, ord=2, dim=-1)
-            self.stats['obs_l2'] = obs_l2.mean().detach().cpu().item()
+            self.stats['obs_l2'].append(obs_l2.mean().detach().cpu().item())
 
-            self.stats['intrinsic_reward_scaling'] = self.intrinsic_reward_scaling
+            self.stats['intrinsic_reward_scaling'].append(self.intrinsic_reward_scaling)
 
         #Checking PPO steps
         #p0 = self.policy.policy.decoder_mean.weight.detach().clone()
@@ -536,7 +536,7 @@ class PuffeRL:
             cst_dist = 1
             inside_l2 = phi_y - phi_x
             cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
-            self.stats['cst_pen_pre_clamp'] = cst_penalty.mean().detach().cpu().item()
+            self.stats['cst_pen_pre_clamp'].append(cst_penalty.mean().detach().cpu().item())
             cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
@@ -546,9 +546,9 @@ class PuffeRL:
             #print("=== Encoder Gradients ===")
             for name, param in self.phi_encoder.named_parameters():
                 if param.grad is None:
-                    self.stats[f'Enc grad : {name}'] = 0.0
+                    self.stats[f'Enc grad : {name}'].append(0.0)
                 else:
-                    self.stats[f'Enc grad : {name}'] = param.grad.detach().norm().item()
+                    self.stats[f'Enc grad : {name}'].append(param.grad.detach().norm().item())
 
             self.opt_phi.step()
 
@@ -561,22 +561,22 @@ class PuffeRL:
             loss_dual_lam.backward()
             self.opt_lambda.step()
 
-            self.stats['dual_lam'] = self.dual_lam.exp().detach().cpu().item()
-            self.stats['loss_dual_lam'] = loss_dual_lam.detach().cpu().item()
-            self.stats['cst_penalty'] = cst_penalty.mean().detach().cpu().item()
-            self.stats['loss_te'] = loss_te.detach().cpu().item()
+            self.stats['dual_lam'].append(self.dual_lam.exp().detach().cpu().item())
+            self.stats['loss_dual_lam'].append(loss_dual_lam.detach().cpu().item())
+            self.stats['cst_penalty'].append(cst_penalty.mean().detach().cpu().item())
+            self.stats['loss_te'].append(loss_te.detach().cpu().item())
             delta_phi2 = inside_l2.pow(2).sum(dim = -1)
-            self.stats['delta_phi2_mean'] = delta_phi2.mean().detach().cpu().item()
-            self.stats['delta_phi_mean'] = delta_phi2.sqrt().mean().detach().cpu().item()
-            self.stats['delta_phi_abs_mean'] = inside_l2.abs().mean().detach().cpu().item()
-            
+            self.stats['delta_phi2_mean'].append(delta_phi2.mean().detach().cpu().item())
+            self.stats['delta_phi_mean'].append(delta_phi2.sqrt().mean().detach().cpu().item())
+            self.stats['delta_phi_abs_mean'].append(inside_l2.abs().mean().detach().cpu().item())
+                  
 
             #update rewards with new phi adn lambda for updating policy
             phi_encoded = self.phi_encoder(mb_obs)
             phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
             mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills).detach()
-            #mb_rewards = (mb_rewards - mb_rewards.mean()) / (mb_rewards.std() + 1e-8)
+            mb_rewards = (mb_rewards - mb_rewards.mean()) / (mb_rewards.std() + 1e-8)
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
@@ -635,9 +635,9 @@ class PuffeRL:
             #print("=== Policy Gradients ===")
             for name, param in self.policy.named_parameters():
                 if param.grad is None:
-                    self.stats[f'Policy grad : {name}'] = 0.0
+                    self.stats[f'Policy grad : {name}'].append(0.0)
                 else:
-                    self.stats[f'Policy grad : {name}'] = param.grad.detach().norm().item()
+                    self.stats[f'Policy grad : {name}'].append(param.grad.detach().norm().item())
 
 
             if (mb + 1) % self.accumulate_minibatches == 0:
