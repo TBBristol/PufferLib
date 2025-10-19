@@ -1083,7 +1083,7 @@ class WandbLogger:
             resume=resume,
             config=args,
             tags = [args['tag']] if args['tag'] is not None else [],
-            settings = dict(disable_code=True,save_code= False, silent=True)
+            settings = dict(disable_code=True,save_code= False, silent=True, _disable_model_save=True)
         )
         self.wandb = wandb
         self.run_id = wandb.run.id
