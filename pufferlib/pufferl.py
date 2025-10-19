@@ -1085,7 +1085,7 @@ class WandbLogger:
         try:
            requests.get("https://api.wandb.ai", timeout=2)
            self.wandb.log(logs, step=step)
-        except:
+        except (requests.exceptions.RequestException, wandb.errors.CommError):
             pass
 
 
