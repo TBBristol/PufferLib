@@ -27,6 +27,8 @@ import torch.distributed
 from torch.distributed.elastic.multiprocessing.errors import record
 import torch.utils.cpp_extension
 
+import requests
+
 import pufferlib
 import pufferlib.sweep
 import pufferlib.vector
