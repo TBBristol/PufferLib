@@ -576,7 +576,7 @@ class PuffeRL:
             phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
             mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills).detach()
-            mb_rewards = (mb_rewards - mb_rewards.mean()) / (mb_rewards.std() + 1e-8)
+            #mb_rewards = (mb_rewards - mb_rewards.mean()) / (mb_rewards.std() + 1e-8)
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
