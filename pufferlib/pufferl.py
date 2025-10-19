@@ -34,6 +34,10 @@ import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
 
+
+import wandb
+import requests
+
 try:
     from pufferlib import _C
 except ImportError:
@@ -1079,15 +1083,15 @@ class WandbLogger:
             resume=resume,
             config=args,
             tags = [args['tag']] if args['tag'] is not None else [],
+            settings = dict(disable_code=True,save_code= False, silent=True)
         )
         self.wandb = wandb
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
         try:
-           requests.get("https://api.wandb.ai", timeout=2)
            self.wandb.log(logs, step=step)
-        except (requests.exceptions.RequestException, wandb.errors.CommError):
+        except:
             pass
 
 
