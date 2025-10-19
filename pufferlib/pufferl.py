@@ -1083,7 +1083,7 @@ class WandbLogger:
             resume=resume,
             config=args,
             tags = [args['tag']] if args['tag'] is not None else [],
-            settings = dict(disable_code=True,save_code= False, silent=True, _disable_model_save=True)
+            settings = dict(disable_code=True,save_code= False, silent=True)
         )
         self.wandb = wandb
         self.run_id = wandb.run.id
@@ -1096,9 +1096,9 @@ class WandbLogger:
 
 
     def close(self, model_path):
-        artifact = self.wandb.Artifact(self.run_id, type='model')
-        artifact.add_file(model_path)
-        self.wandb.run.log_artifact(artifact)
+        #artifact = self.wandb.Artifact(self.run_id, type='model')
+        #artifact.add_file(model_path)
+        #self.wandb.run.log_artifact(artifact)
         self.wandb.finish()
 
     def download(self):
