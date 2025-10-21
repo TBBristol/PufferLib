@@ -160,6 +160,7 @@ MAKE_FUNCTIONS = {
     'stacking': 'ContainerStacking',
     'whisker_racer': 'WhiskerRacer',
     'onestateworld': 'World',
+    'onlyfish': 'OnlyFish',
     'chain_mdp': 'Chain',
     'spaces': make_spaces,
     'multiagent': make_multiagent,
