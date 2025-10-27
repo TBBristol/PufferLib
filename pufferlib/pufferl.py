@@ -464,6 +464,7 @@ class PuffeRL:
             self.rewards[:,:] = rewards
 
             self.stats['PureRewardMean'].append(rewards.mean().detach().cpu().item())
+            self.stats['PureRewardAbs'].append(abs(rewards).mean().detach().cpu().item())
             self.stats['PureRewardStd'].append(rewards.std().detach().cpu().item())
             self.stats['Cos_align'].append(self.alignment.mean().item())
             self.stats['Cos_align_std'].append(self.alignment.std().item())
@@ -566,6 +567,7 @@ class PuffeRL:
 
             self.opt_lambda.zero_grad()
             loss_dual_lam.backward()
+            self.stats[f'dual_lam_grad'].append(self.dual_lam.grad.detach().item())
             self.opt_lambda.step()
 
             self.stats['dual_lam'].append(self.dual_lam.exp().detach().cpu().item())
