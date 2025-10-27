@@ -221,6 +221,7 @@ class PuffeRL:
 
         self.dual_slack = config['dual_slack']
         self.intrinsic_reward_scaling = config['intrinsic_reward_scaling']
+        self.ppo_reward_scaling = config['ppo_reward_scaling']
         
 
         # Logging
@@ -582,6 +583,9 @@ class PuffeRL:
             phi_encoded_tail = self.phi_encoder(mb_tail_obs).unsqueeze(1)
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
             mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills).detach()
+
+            mb_rewards *= self.ppo_reward_scaling  #SCALE PPO REWARD
+            mb_rewards = mb_rewards.clamp(min=-1.0, max=1.0)  #CLAMP REWARD
 
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
