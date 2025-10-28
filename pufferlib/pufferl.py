@@ -152,6 +152,7 @@ class PuffeRL:
         self.phi_encoder = Phi_Encoder(*obs_space.shape, 
                                        hidden_dim=config['phi_hidden'], 
                                        output_dim=config['skill_dim'])
+        
 
         self.phi_encoder.to(device)
         #dual_lam = ParameterModule(torch.Tensor([np.log(args.dual_lam)]))
@@ -288,7 +289,7 @@ class PuffeRL:
 
         self.pending_tails = torch.full((self.total_agents,), -1, device=device, dtype=torch.long)
 
-
+        dones_test = False
         self.full_rows = 0
         while self.full_rows < self.segments or  (self.pending_tails >=0).any():
             profile('env', epoch)
@@ -315,6 +316,14 @@ class PuffeRL:
                 local_idx = self.curr_skill_id[env_id]
                 local_idx[done_mask] = new_ids
                 self.curr_skill_id[env_id] = local_idx
+                dones_test = True
+                if config['use_rnn']:
+                    h = self.lstm_h[env_id.start]
+                    c = self.lstm_c[env_id.start]
+                    h[done_mask] = 0
+                    c[done_mask] = 0
+                    self.lstm_h[env_id.start] = h
+                    self.lstm_c[env_id.start] = c
 
 
             pending = self.pending_tails[env_id]
@@ -523,6 +532,7 @@ class PuffeRL:
             mb_skills = self.skills[self.row_skill_ids[idx]] #B,S,D dont unsqeeze here as it will break the reward passes
             B,S,D = mb_obs.shape
             mb_skills_flat = mb_skills.reshape(-1, self.skill_dim) #B*S,D
+            assert self.row_skill_ids[self.row_skill_ids < 0].shape[0] == 0
             
 
             profile('train_forward', epoch)
@@ -546,7 +556,7 @@ class PuffeRL:
 
             #update te
             mb_rewards = self._update_rewards_mb(phi_encoded, mb_skills)
-            dual_lam = self.dual_lam.exp()  ##check me vs theirs
+            dual_lam = self.dual_lam.exp()  
             phi_x = phi_encoded[:,:-1,:] #B, S-1, D
             phi_y = phi_encoded[:,1:,:]
             cst_dist = 1
@@ -594,9 +604,13 @@ class PuffeRL:
             phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim =1)
             mb_rewards = self._update_rewards_mb(phi_encoded,mb_skills).detach()
 
-            mb_rewards *= self.ppo_reward_scaling  #SCALE PPO REWARD
-            mb_rewards = mb_rewards.clamp(min=-1.0, max=1.0)  #CLAMP REWARD
+            self.stats['ppo_rewards'].append(mb_rewards.mean().detach().cpu().item())
 
+            mb_rewards *= self.ppo_reward_scaling  #SCALE PPO REWARD
+
+           # mb_rewards = mb_rewards.clamp(min=-1.0, max=1.0)  #CLAMP REWARD
+
+            self.stats['ppo_rewards_scaled'].append(mb_rewards.mean().detach().cpu().item())
             logits, newvalue = self.policy(mb_obs, state)
             actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
 
