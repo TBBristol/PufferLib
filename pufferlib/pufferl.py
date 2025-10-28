@@ -484,6 +484,14 @@ class PuffeRL:
         #Checking PPO steps
         #p0 = self.policy.policy.decoder_mean.weight.detach().clone()
         #step_count = 0
+            xy_coords = self.observations[:,:,:2].reshape(-1,2).detach().cpu().numpy()
+            unique_xy_coords = np.unique(np.floor(xy_coords), axis=0)
+            num_total_coords = self.observations.shape[0]*self.observations.shape[1]
+            self.stats['MjNumUniqueCoords'].append(len(unique_xy_coords))
+            self.stats['MjUniqueCoords%'].append((len(unique_xy_coords)/num_total_coords)*100)
+
+
+            
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch, nest=True)
