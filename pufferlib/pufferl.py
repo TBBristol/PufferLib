@@ -461,7 +461,39 @@ class PuffeRL:
         vf_clip = config['vf_clip_coef']
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
+
+        for _ in range(self.config['phi_updates']):
+            phi_encoded = self.phi_encoder(self.observations)
+            phi_encoded_tail = self.phi_encoder(self.tail_obs).unsqueeze(1)
+            phi_encoded = torch.cat([phi_encoded, phi_encoded_tail], dim=1) #b,s+1,d
+            skills = self.skills[self.row_skill_ids] 
+            rewards = self._update_rewards_mb(phi_encoded, skills)
+            with torch.no_grad():
+                phi_x = phi_encoded[:,:-1,:] #B, S-1, D
+                phi_y = phi_encoded[:,1:,:]
+                cst_dist = 1
+                inside_l2 = phi_y - phi_x
+                cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
+                cst_penalty = torch.clamp(cst_penalty, max =self.dual_slack)
+                dual_lam = self.dual_lam.exp()
+            loss_te = 0
+            for sid in range(self.num_skills):
+                mask = (self.row_skill_ids == sid)
+                if mask.any():
+                    
+                    te_obj = rewards[mask] + dual_lam.detach() * cst_penalty[mask]
+                    loss_te -= te_obj.mean()
+                
+            self.opt_phi.zero_grad()
+            loss_te.backward()
+            self.opt_phi.step()
         
+        for sid in range(self.num_skills):
+            mask = (self.row_skill_ids == sid)
+            if mask.any():
+                self.stats[f'PureRewardMean_skill{sid}'].append(rewards[mask].mean().item())
+
+
         with torch.no_grad():
             #calculate inital rewards intrisically
             phi_encoded = self.phi_encoder(self.observations)
@@ -563,7 +595,7 @@ class PuffeRL:
             inside_l2 = phi_y - phi_x
             cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
             self.stats['cst_pen_pre_clamp'].append(cst_penalty.mean().detach().cpu().item())
-            cst_penalty = torch.clamp(cst_penalty, max = self.dual_slack)
+            cst_penalty = torch.clamp(cst_penalty, max =self.dual_slack)  
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
             
