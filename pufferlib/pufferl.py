@@ -600,7 +600,8 @@ class PuffeRL:
             inside_l2 = phi_y - phi_x
             cst_penalty = cst_dist - torch.square(inside_l2).sum(dim = -1)
             self.stats['cst_pen_pre_clamp'].append(cst_penalty.mean().detach().cpu().item())
-            cst_penalty = torch.clamp(cst_penalty, max =self.dual_slack)  
+            cst_penalty = torch.clamp(cst_penalty, max =self.dual_slack)
+            self.stats['cst_te_component'].append((cst_penalty*dual_lam.detach().cpu()).mean().item())
             te_obj = mb_rewards + dual_lam.detach() * cst_penalty
             loss_te = -te_obj.mean()
             
@@ -620,10 +621,12 @@ class PuffeRL:
             log_dual_lam = self.dual_lam #check this
             loss_dual_lam =  log_dual_lam * (cst_penalty.detach()).mean()
 
-            self.opt_lambda.zero_grad()
-            loss_dual_lam.backward()
-            self.stats[f'dual_lam_grad'].append(self.dual_lam.grad.detach().item())
-            self.opt_lambda.step()
+            if self.global_step > 1:
+
+                self.opt_lambda.zero_grad()
+                loss_dual_lam.backward()
+                self.stats[f'dual_lam_grad'].append(self.dual_lam.grad.detach().item())
+                self.opt_lambda.step()
 
             self.stats['dual_lam'].append(self.dual_lam.exp().detach().cpu().item())
             self.stats['loss_dual_lam'].append(loss_dual_lam.detach().cpu().item())
@@ -668,7 +671,9 @@ class PuffeRL:
                 ratio, adv, config['gamma'], config['gae_lambda'],
                 config['vtrace_rho_clip'], config['vtrace_c_clip'])
             mb_returns = mb_values + adv
+
             adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+
 
             # Losses
             pg_loss1 = -adv * ratio
