@@ -202,8 +202,10 @@ class PuffeRL:
             #self.metra_skills = torch.randn(self.num_skills,self.phi_dim, device=self.config['device'])
             #metra skills zero mean and unit variance to make waserstein cancel nicely
             self.skills = torch.eye(self.num_skills, self.skill_dim, device=device)
-            self.skills = self.skills - self.skills.mean(dim=1, keepdim=True)
-            self.skills = self.skills * (self.num_skills / (self.num_skills - 1))
+            
+            #self.skills = self.skills - self.skills.mean(dim=1, keepdim=True)
+            #self.skills = self.skills * (self.num_skills / (self.num_skills - 1))
+            
             #self.metra_skills = self.metra_skills -self.metra_skills.mean(dim=1, keepdim=True)
             #self.metra_skills *= self.num_skills
             #self.metra_skills = self.metra_skills / (self.num_skills - 1 if self.num_skills != 1 else 1)
@@ -438,6 +440,8 @@ class PuffeRL:
         curr_z = mb_phi_encoded_obs[:,:-1,:] #B,S+1,D
         next_z = mb_phi_encoded_obs[:,1:,:] #B,S+1,D
         target_z = next_z - curr_z
+        mb_skills = mb_skills - mb_skills.mean(dim=-1, keepdim=True)  #FOR DISC  ONLY
+        mb_skills = mb_skills * (self.num_skills / (self.num_skills - 1)) #FOR DISC  ONLY
         rewards = (target_z *mb_skills).sum(dim = -1) #B, S
         #clunky way to get this so I can log it withput returning it
         z= mb_skills.expand_as(target_z)
@@ -450,6 +454,7 @@ class PuffeRL:
     def train(self):
         profile = self.profile
         epoch = self.epoch
+
         profile('train', epoch)
         losses = defaultdict(float)
         config = self.config
