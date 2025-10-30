@@ -7,6 +7,36 @@ import torch.nn as nn
 import pufferlib.emulation
 import pufferlib.pytorch
 import pufferlib.spaces
+import geoopt
+
+class Poincare_Module(nn.Module):
+    def __init__(self,
+                 in_features,
+                 out_features, #num_planes,
+                 c= 1.0,
+                 dimensions_per_space = 1
+                 ):
+        super().__init__()
+        self.c = c
+        self.num_planes = out_features
+        self.in_features = in_features
+        self.ball = geoopt.PoincareBall(c = self.c)
+        self.dimensions_per_space = dimensions_per_space
+
+        if dimensions_per_space is not None:
+            assert in_features % dimensions_per_space == 0
+            self.dimensions_per_space = dimensions_per_space
+            self.num_spaces = in_features // dimensions_per_space
+        else:
+            self.dimensions_per_space = self.in_features
+            self.num_spaces = 1
+      
+        self.normals = nn.Parameter(torch.empty((self.num_planes, self.num_spaces, self.dimensions_per_space)))
+        self.bias = geoopt.ManifoldParameter(torch.zeroes(self.num_planes, self.num_spaces, self.dimensions_per_space),
+                                             manifold = self.ball)
+
+
+
 
 
 class Default(nn.Module):
@@ -23,6 +53,10 @@ class Default(nn.Module):
     '''
     def __init__(self, env, hidden_size=128):
         super().__init__()
+
+
+
+
         self.hidden_size = hidden_size
         self.is_multidiscrete = isinstance(env.single_action_space,
                 pufferlib.spaces.MultiDiscrete)
@@ -61,7 +95,7 @@ class Default(nn.Module):
 
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
-
+        
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)
         logits, values = self.decode_actions(hidden)

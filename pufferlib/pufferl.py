@@ -133,6 +133,7 @@ class PuffeRL:
         self.total_minibatches = int(config['update_epochs'] * batch_size / self.minibatch_size)
         self.minibatch_segments = self.minibatch_size // horizon 
         if self.minibatch_segments * horizon != self.minibatch_size:
+        
             raise pufferlib.APIUsageError(
                 f'minibatch_size {self.minibatch_size} must be divisible by bptt_horizon {horizon}'
             )
@@ -140,6 +141,12 @@ class PuffeRL:
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
+
+        for n,l in self.policy.named_modules():
+            breakpoint()
+            
+
+
         if config['compile']:
             self.policy = torch.compile(policy, mode=config['compile_mode'])
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
