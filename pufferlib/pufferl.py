@@ -142,11 +142,6 @@ class PuffeRL:
         self.uncompiled_policy = policy
         self.policy = policy
 
-        for n,l in self.policy.named_modules():
-            breakpoint()
-            
-
-
         if config['compile']:
             self.policy = torch.compile(policy, mode=config['compile_mode'])
             self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])

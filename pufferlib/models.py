@@ -8,13 +8,14 @@ import pufferlib.emulation
 import pufferlib.pytorch
 import pufferlib.spaces
 import geoopt
+from torch.nn.utils import spectral_norm
 
 class Poincare_Module(nn.Module):
     def __init__(self,
                  in_features,
                  out_features, #num_planes,
                  c= 1.0,
-                 dimensions_per_space = 1
+                 dimensions_per_space = None
                  ):
         super().__init__()
         self.c = c
@@ -32,11 +33,23 @@ class Poincare_Module(nn.Module):
             self.num_spaces = 1
       
         self.normals = nn.Parameter(torch.empty((self.num_planes, self.num_spaces, self.dimensions_per_space)))
-        self.bias = geoopt.ManifoldParameter(torch.zeroes(self.num_planes, self.num_spaces, self.dimensions_per_space),
+        self.bias = geoopt.ManifoldParameter(torch.zeros(self.num_planes, self.num_spaces, self.dimensions_per_space),
                                              manifold = self.ball)
+        with torch.no_grad():
+            nn.init.zeros_(self.bias)
+            nn.init.normal_(self.normals, std = 1/np.sqrt(self.in_features))
 
-
-
+    def forward(self, x):
+        in_batch_dims = x.size()[:-1]
+        x = x.view(-1, self.num_spaces, self.dimensions_per_space)
+        x = x / np.sqrt(self.dimensions_per_space)
+        x = self.ball.expmap0(x, project=True)
+        x = x.unsqueeze(-3)
+        distances = self.ball.dist2plane(x, p= self.bias, a = self.normals, signed=True)
+        #output is batch x num_planes x num_spaces
+        #sum across sub-spaces
+        distances = distances.sum(-1) #batch x num_planes (out_features)
+        return distances
 
 
 class Default(nn.Module):
@@ -78,15 +91,14 @@ class Default(nn.Module):
                 nn.GELU(),
             )
             
-        if self.is_multidiscrete:
-            self.action_nvec = tuple(env.single_action_space.nvec)
-            num_atns = sum(self.action_nvec)
-            self.decoder = pufferlib.pytorch.layer_init(
-                    nn.Linear(hidden_size, num_atns), std=0.01)
-        elif not self.is_continuous:
-            num_atns = env.single_action_space.n
-            self.decoder = pufferlib.pytorch.layer_init(
-                nn.Linear(hidden_size, num_atns), std=0.01)
+        if self.is_multidiscrete or not self.is_continuous:
+            num_actions = env.single_action_space.n if not self.is_multidiscrete else sum(env.single_action_space.nvec)
+            self.decoder = Poincare_Module(
+                in_features=hidden_size,
+                out_features=num_actions,
+                c=1.0,
+                dimensions_per_space=None,
+            )
         else:
             self.decoder_mean = pufferlib.pytorch.layer_init(
                 nn.Linear(hidden_size, env.single_action_space.shape[0]), std=0.01)
@@ -95,6 +107,14 @@ class Default(nn.Module):
 
         self.value = pufferlib.pytorch.layer_init(
             nn.Linear(hidden_size, 1), std=1)
+
+        ### Spectral Normalization For Euclidean Encoder
+
+        for m in self.encoder.modules():
+            if isinstance(m, nn.Linear):
+                spectral_norm(m)
+
+
         
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)
