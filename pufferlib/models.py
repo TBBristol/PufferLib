@@ -105,14 +105,21 @@ class Default(nn.Module):
             self.decoder_logstd = nn.Parameter(torch.zeros(
                 1, env.single_action_space.shape[0]))
 
-        self.value = pufferlib.pytorch.layer_init(
-            nn.Linear(hidden_size, 1), std=1)
+        #self.value = pufferlib.pytorch.layer_init(
+         #   nn.Linear(hidden_size, 1), std=1)
+
+        self.value = Poincare_Module(
+                in_features=hidden_size,
+                out_features=1,
+                c=1.0,
+                dimensions_per_space=None,
+            )
 
         ### Spectral Normalization For Euclidean Encoder
 
-        for m in self.encoder.modules():
-            if isinstance(m, nn.Linear):
-                spectral_norm(m)
+        #for m in self.encoder.modules():
+        #    if isinstance(m, nn.Linear):
+        #        spectral_norm(m)
 
 
         
