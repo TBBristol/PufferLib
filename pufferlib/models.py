@@ -32,14 +32,15 @@ class Poincare_Module(nn.Module):
             self.dimensions_per_space = self.in_features
             self.num_spaces = 1
       
-        self.normals = nn.Parameter(torch.empty((self.num_planes, self.num_spaces, self.dimensions_per_space)))
-        self.bias = geoopt.ManifoldParameter(torch.zeros(self.num_planes, self.num_spaces, self.dimensions_per_space),
+        self.normals = nn.Parameter(torch.empty((self.num_planes, self.num_spaces, self.dimensions_per_space),dtype=torch.float64,device = 'cuda'))
+        self.bias = geoopt.ManifoldParameter(torch.zeros(self.num_planes, self.num_spaces, self.dimensions_per_space, dtype=torch.float64,device = 'cuda'),
                                              manifold = self.ball)
         with torch.no_grad():
             nn.init.zeros_(self.bias)
             nn.init.normal_(self.normals, std = 1/np.sqrt(self.in_features))
 
     def forward(self, x):
+        x = x.to(torch.float64)
         in_batch_dims = x.size()[:-1]
         x = x.view(-1, self.num_spaces, self.dimensions_per_space)
         x = x / np.sqrt(self.dimensions_per_space)
@@ -49,6 +50,7 @@ class Poincare_Module(nn.Module):
         #output is batch x num_planes x num_spaces
         #sum across sub-spaces
         distances = distances.sum(-1) #batch x num_planes (out_features)
+        distances = distances.to(torch.float32)
         return distances
 
 
