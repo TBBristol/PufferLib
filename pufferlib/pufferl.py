@@ -153,6 +153,7 @@ class PuffeRL:
             self.a_optimizer = torch.optim.Adam([self.log_alpha], lr=config['q_lr'])
         else:
             self.alpha = config['alpha']
+            self.autotune = False
 
        
         # Logging
@@ -255,9 +256,11 @@ class PuffeRL:
                         self.observations[self.pos, env_id] = self.obs_buf[env_id].to(device)
                         self.next_observations[self.pos, env_id] = o_device
 
+                    done_mask = (d.bool() | t.bool())  #To handle truncs so we dont false bootstrap
+
                     self.actions[self.pos, env_id] = self.act_buf[env_id]
                     self.rewards[self.pos, env_id] = r
-                    self.terminals[self.pos, env_id] = d.float()
+                    self.terminals[self.pos, env_id] = done_mask.float()
                     self.truncations[self.pos, env_id] = t
 
                     if env_id.stop == self.total_agents:
