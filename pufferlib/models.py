@@ -7,6 +7,7 @@ import torch.nn as nn
 import pufferlib.emulation
 import pufferlib.pytorch
 import pufferlib.spaces
+import torch.nn.functional as F
 
 class SoftQNetwork(nn.Module):
     def __init__(self, env):
@@ -68,7 +69,7 @@ class Actor(nn.Module):
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
-        y_t = torch.tanh(x_t)
+        y_t :e = torch.tanh(x_t)
         action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
         # Enforcing Action Bound
