@@ -498,7 +498,7 @@ class PuffeRL:
         if os.path.exists(model_path):
             return model_path
 
-        #torch.save(self.uncompiled_policy.state_dict(), model_path)
+        torch.save(self.actor.state_dict(), model_path)
 
         state = {
             'global_step': self.global_step,
@@ -964,11 +964,15 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
         with torch.no_grad():
             ob = torch.as_tensor(ob).to(device)
-            logits, value = policy.forward_eval(ob, state)
-            action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-            action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+            if hasattr(policy, "get_action") and not hasattr(policy, "sample_logits"):
+                    action, _, _ = policy.get_action(ob)
+                    action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+            else:
+                logits, value = policy.forward_eval(ob, state)
+                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                action = action.cpu().numpy().reshape(vecenv.action_space.shape)
 
-        if isinstance(logits, torch.distributions.Normal):
+        if isinstance(vecenv.action_space, pufferlib.spaces.Box):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
         ob = vecenv.step(action)[0]

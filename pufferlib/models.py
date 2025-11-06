@@ -64,6 +64,10 @@ class Actor(nn.Module):
 
         return mean, log_std
 
+    def forward_eval(self, x, state=None):
+        _,_,mean = self.get_action(x)
+        return mean, None
+
     def get_action(self, x):
         mean, log_std = self(x)
         std = log_std.exp()
