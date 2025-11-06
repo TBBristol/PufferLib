@@ -59,7 +59,7 @@ class PuffeRL:
         # Reproducibility
         seed = config['seed']
         #random.seed(seed)
-#np.random.seed(seed)
+        #np.random.seed(seed)
         #torch.manual_seed(seed)
 
         # Vecenv info
@@ -68,15 +68,9 @@ class PuffeRL:
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
         self.total_agents = total_agents
+        
 
-        # Experience
-        """if config['batch_size'] == 'auto' and config['bptt_horizon'] == 'auto':
-            raise pufferlib.APIUsageError('Must specify batch_size or bptt_horizon')
-        elif config['batch_size'] == 'auto':
-            config['batch_size'] = total_agents * config['bptt_horizon']
-        elif config['bptt_horizon'] == 'auto':
-            config['bptt_horizon'] = config['batch_size'] // total_agents"""
-
+        
         buffer_size = int(float(config['buffer_size']))
 
         segments = int(config['buffer_size'] // total_agents)
@@ -103,9 +97,6 @@ class PuffeRL:
         self.rewards = torch.zeros(segments, total_agents, device=device)
         self.terminals = torch.zeros(segments, total_agents, device=device)
         self.truncations = torch.zeros(segments, total_agents, device=device)
-        self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
-        self.free_idx = total_agents
 
         self.pos = 0
         self.buffer_full = False
@@ -119,17 +110,6 @@ class PuffeRL:
         self.act_buf = torch.zeros(total_agents, *atn_space.shape, device=device,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
         self.has_state = torch.zeros(total_agents, device=device, dtype=torch.bool)
-
-
-
-
-        # LSTM
-        #if config['use_rnn']:
-         #   n = vecenv.agents_per_batch
-          #  h = policy.hidden_size
-           # self.lstm_h = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
-            #self.lstm_c = {i*n: torch.zeros(n, h, device=device) for i in range(total_agents//n)}
-
         # Minibatching & gradient accumulation
         minibatch_size = config['minibatch_size']
 
@@ -148,12 +128,12 @@ class PuffeRL:
            # pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
         from pufferlib.models import SoftQNetwork, Actor
-
-        self.actor = Actor(vecenv.driver_env).to(device)
-        self.qf1 = SoftQNetwork(vecenv.driver_env).to(device)
-        self.qf2 = SoftQNetwork(vecenv.driver_env).to(device)
-        self.qf1_target = SoftQNetwork(vecenv.driver_env).to(device)
-        self.qf2_target = SoftQNetwork(vecenv.driver_env).to(device)
+        hidden_size = config['hidden_size']
+        self.actor = Actor(vecenv.driver_env, hidden_size).to(device)
+        self.qf1 = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
+        self.qf2 = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
+        self.qf1_target = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
+        self.qf2_target = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
         self.qf1_target.load_state_dict(self.qf1.state_dict())
         self.qf2_target.load_state_dict(self.qf2.state_dict())
         self.q_optimizer = torch.optim.Adam(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=config['q_lr'])
@@ -204,7 +184,8 @@ class PuffeRL:
         self.losses = {}
 
         # Dashboard
-        self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        models = [self.actor, self.qf1, self.qf2, self.qf1_target, self.qf2_target]
+        self.model_size = sum(p.numel() for m in models for p in m.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
     @property
@@ -256,7 +237,7 @@ class PuffeRL:
                 if self.pos *self.total_agents <= self.learning_starts:
                     action = np.array([self.vecenv.single_action_space.sample() for _ in range(env_id.stop-env_id.start)])
                 else:
-                    action, _,_ = self.actor.get_action(o_device)
+                    action = self.actor.get_action_eval(o_device)
                     action.detach()
 
             profile('eval_copy', epoch)
@@ -319,9 +300,6 @@ class PuffeRL:
 
 
         profile('eval_misc', epoch)
-        self.free_idx = self.total_agents
-        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
-        self.ep_lengths.zero_()
         profile.end()
         return self.stats
 
@@ -351,19 +329,21 @@ class PuffeRL:
         mb_obs = self.observations[row_idx, agent_idx]
         mb_next_obs = self.next_observations[row_idx, agent_idx]
         mb_actions = self.actions[row_idx, agent_idx]
-        mb_rewards = self.rewards[row_idx, agent_idx]
-        mb_terminals = self.terminals[row_idx, agent_idx]
-        mb_truncations = self.truncations[row_idx, agent_idx]
+        mb_rewards = self.rewards[row_idx, agent_idx].view(-1,1)
+        mb_terminals = self.terminals[row_idx, agent_idx].view(-1,1)
+        mb_truncations = self.truncations[row_idx, agent_idx].view(-1,1)
        
-        profile('train_forward', epoch)
+       
         
         
         with torch.no_grad():
+            profile('train_actor_forward', epoch)
             next_state_actions, next_state_logpi, _ = self.actor.get_action(mb_next_obs)
+            profile('train_q_forward', epoch)
             qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
             qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
             min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
-            next_q_value = mb_rewards.flatten() + (1 - mb_terminals.float()) * self.gamma * min_qf_next_target
+            next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
 
         qf1_a_values = self.qf1(mb_obs, mb_actions)
         qf2_a_values = self.qf2(mb_obs, mb_actions)
@@ -377,7 +357,9 @@ class PuffeRL:
 
         if self.global_step % self.policy_freq == 0:
             for _ in range(self.policy_freq):
+                profile('train_pol_actor_forward', epoch)
                 pi, log_pi,_ = self.actor.get_action(mb_obs)
+                profile('train_pol_q_forward', epoch)
                 qf1_pi = self.qf1(mb_obs, pi)
                 qf2_pi = self.qf2(mb_obs, pi)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi)
@@ -391,6 +373,7 @@ class PuffeRL:
 
                 if self.autotune:
                     with torch.no_grad():
+                        profile('train_tune_actor_forward', epoch)
                         _, log_pi, _ = self.actor.get_action(mb_obs)
                     alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
 
@@ -404,6 +387,7 @@ class PuffeRL:
 
 
         if self.global_step % self.target_network_update_freq == 0:
+            profile('train_network_update_copy', epoch)
             for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
             for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
@@ -569,7 +553,12 @@ class PuffeRL:
         p.add_row(*fmt_perf('  Copy', c2, delta, profile.eval_copy, b2, c2))
         p.add_row(*fmt_perf('  Misc', c2, delta, profile.eval_misc, b2, c2))
         p.add_row(*fmt_perf('Train', b1, delta, profile.train, b2, c2))
-        p.add_row(*fmt_perf('  Forward', c2, delta, profile.train_forward, b2, c2))
+        p.add_row(*fmt_perf('  Act_Forward', c2, delta, profile.train_actor_forward, b2, c2))
+        p.add_row(*fmt_perf('  Q_Forward', c2, delta, profile.train_q_forward, b2, c2))
+
+        p.add_row(*fmt_perf('  Pol_Act_Forward', c2, delta, profile.train_pol_actor_forward, b2, c2))
+        p.add_row(*fmt_perf('  Pol_Q_Forward', c2, delta, profile.train_pol_q_forward, b2, c2))
+        p.add_row(*fmt_perf('  Tune_Act_Forward', c2, delta, profile.train_tune_actor_forward, b2, c2))
         p.add_row(*fmt_perf('  Learn', c2, delta, profile.learn, b2, c2))
         p.add_row(*fmt_perf('  Copy', c2, delta, profile.train_copy, b2, c2))
         p.add_row(*fmt_perf('  Misc', c2, delta, profile.train_misc, b2, c2))
