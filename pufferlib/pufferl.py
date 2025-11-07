@@ -184,6 +184,8 @@ class PuffeRL:
         self.last_stats = defaultdict(list)
         self.losses = {}
 
+        self.last_log_epoch = 0
+
         # Dashboard
         models = [self.actor, self.qf1, self.qf2, self.qf1_target, self.qf2_target]
         self.model_size = sum(p.numel() for m in models for p in m.parameters() if p.requires_grad)
@@ -200,6 +202,14 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
+    @property
+    def eps(self):
+        if self.epoch == self.last_log_epoch:
+            return 0
+        rate = (self.epoch - self.last_log_epoch) / (time.time() - self.last_log_time)
+        return round(rate, 1)
+
+    
     def evaluate(self):
         profile = self.profile
         epoch = self.epoch
@@ -235,7 +245,7 @@ class PuffeRL:
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
 
-                if self.pos *self.total_agents <= self.learning_starts:
+                if self.global_step <= self.learning_starts:
                     action = np.array([self.vecenv.single_action_space.sample() for _ in range(env_id.stop-env_id.start)])
                 else:
                     action = self.actor.get_action_eval(o_device)
@@ -310,105 +320,111 @@ class PuffeRL:
     def train(self):
         profile = self.profile
         epoch = self.epoch
-        profile('train', epoch)
         losses = defaultdict(float)
         config = self.config
         device = config['device']
         self.gamma = config['gamma']
 
+        updates = max(1, int(self.total_agents * config['train_ratio']))
 
-        profile('train_misc', epoch, nest=True)
-        self.amp_context.__enter__()
+        for _ in range(updates):
+            profile('train', epoch)
 
-        profile('train_copy', epoch)
-     
+
+
+            profile('train_misc', epoch, nest=True)
+            self.amp_context.__enter__()
+
+            profile('train_copy', epoch)
+         
+            
+            if self.buffer_full:
+                row_idx = np.random.randint(0, self.segments, size=self.minibatch_size)
+            else:
+                row_idx = np.random.randint(1, self.pos, size=self.minibatch_size)
+            agent_idx = np.random.randint(0, self.total_agents, size=self.minibatch_size)
+
+            mb_obs = self.observations[row_idx, agent_idx]
+            mb_next_obs = self.next_observations[row_idx, agent_idx]
+            mb_actions = self.actions[row_idx, agent_idx]
+            mb_rewards = self.rewards[row_idx, agent_idx].view(-1,1)
+            mb_terminals = self.terminals[row_idx, agent_idx].view(-1,1)
+            mb_truncations = self.truncations[row_idx, agent_idx].view(-1,1)
+           
+           
+            
+            
+            with torch.no_grad():
+                profile('train_actor_forward', epoch)
+                next_state_actions, next_state_logpi, _ = self.actor.get_action(mb_next_obs)
+                profile('train_q_forward', epoch)
+                qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
+                qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
+                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
+                next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
+
+            qf1_a_values = self.qf1(mb_obs, mb_actions)
+            qf2_a_values = self.qf2(mb_obs, mb_actions)
+            qf1_loss = torch.nn.functional.mse_loss(qf1_a_values, next_q_value)
+            qf2_loss = torch.nn.functional.mse_loss(qf2_a_values, next_q_value)
+            qf_loss = qf1_loss + qf2_loss
+
+            self.q_optimizer.zero_grad()
+            qf_loss.backward()
+            self.q_optimizer.step()
+
+            if self.epoch % self.policy_freq == 0:
+                for _ in range(self.policy_freq):
+                    profile('train_pol_actor_forward', epoch)
+                    pi, log_pi,_ = self.actor.get_action(mb_obs)
+                    profile('train_pol_q_forward', epoch)
+                    qf1_pi = self.qf1(mb_obs, pi)
+                    qf2_pi = self.qf2(mb_obs, pi)
+                    min_qf_pi = torch.min(qf1_pi, qf2_pi)
+                    actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+
+                    self.actor_optimizer.zero_grad()
+                    actor_loss.backward()
+                    self.actor_optimizer.step()
+
+                    losses['actor_loss'] = actor_loss.item()
+
+                    if self.autotune:
+                        with torch.no_grad():
+                            profile('train_tune_actor_forward', epoch)
+                            _, log_pi, _ = self.actor.get_action(mb_obs)
+                        alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+
+                        self.a_optimizer.zero_grad()
+                        alpha_loss.backward()
+                        self.a_optimizer.step()
+                        self.alpha = self.log_alpha.exp().item()
+
+                        losses['alpha_loss'] = alpha_loss.item()
+                        losses['alpha'] = self.alpha
+
+
+            if self.epoch % self.target_network_update_freq == 0:
+                profile('train_network_update_copy', epoch)
+                for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
+                    target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+                for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
+                    target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+            profile('train_misc', epoch)
         
-        if self.buffer_full:
-            row_idx = np.random.randint(0, self.segments, size=self.minibatch_size)
-        else:
-            row_idx = np.random.randint(1, self.pos, size=self.minibatch_size)
-        agent_idx = np.random.randint(0, self.total_agents, size=self.minibatch_size)
+            # Logging
+            profile('train_misc', epoch)
+            losses['qf1_values'] = qf1_a_values.mean().item()
+            losses['qf2_values'] = qf2_a_values.mean().item()
+            losses['qf1_loss'] = qf1_loss.item()
+            losses['qf2_loss'] = qf2_loss.item()
+            losses['qf_loss'] = qf_loss.item()
 
-        mb_obs = self.observations[row_idx, agent_idx]
-        mb_next_obs = self.next_observations[row_idx, agent_idx]
-        mb_actions = self.actions[row_idx, agent_idx]
-        mb_rewards = self.rewards[row_idx, agent_idx].view(-1,1)
-        mb_terminals = self.terminals[row_idx, agent_idx].view(-1,1)
-        mb_truncations = self.truncations[row_idx, agent_idx].view(-1,1)
-       
-       
-        
-        
-        with torch.no_grad():
-            profile('train_actor_forward', epoch)
-            next_state_actions, next_state_logpi, _ = self.actor.get_action(mb_next_obs)
-            profile('train_q_forward', epoch)
-            qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
-            qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
-            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
-            next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
+            profile.end()
+            logs = None
+            self.epoch += 1
 
-        qf1_a_values = self.qf1(mb_obs, mb_actions)
-        qf2_a_values = self.qf2(mb_obs, mb_actions)
-        qf1_loss = torch.nn.functional.mse_loss(qf1_a_values, next_q_value)
-        qf2_loss = torch.nn.functional.mse_loss(qf2_a_values, next_q_value)
-        qf_loss = qf1_loss + qf2_loss
-
-        self.q_optimizer.zero_grad()
-        qf_loss.backward()
-        self.q_optimizer.step()
-
-        if self.global_step % self.policy_freq == 0:
-            for _ in range(self.policy_freq):
-                profile('train_pol_actor_forward', epoch)
-                pi, log_pi,_ = self.actor.get_action(mb_obs)
-                profile('train_pol_q_forward', epoch)
-                qf1_pi = self.qf1(mb_obs, pi)
-                qf2_pi = self.qf2(mb_obs, pi)
-                min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
-
-                self.actor_optimizer.zero_grad()
-                actor_loss.backward()
-                self.actor_optimizer.step()
-
-                losses['actor_loss'] = actor_loss.item()
-
-                if self.autotune:
-                    with torch.no_grad():
-                        profile('train_tune_actor_forward', epoch)
-                        _, log_pi, _ = self.actor.get_action(mb_obs)
-                    alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
-
-                    self.a_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    self.a_optimizer.step()
-                    self.alpha = self.log_alpha.exp().item()
-
-                    losses['alpha_loss'] = alpha_loss.item()
-                    losses['alpha'] = self.alpha
-
-
-        if self.global_step % self.target_network_update_freq == 0:
-            profile('train_network_update_copy', epoch)
-            for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-            for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-        profile('train_misc', epoch)
-    
-        # Logging
-        profile('train_misc', epoch)
-        losses['qf1_values'] = qf1_a_values.mean().item()
-        losses['qf2_values'] = qf2_a_values.mean().item()
-        losses['qf1_loss'] = qf1_loss.item()
-        losses['qf2_loss'] = qf2_loss.item()
-        losses['qf_loss'] = qf_loss.item()
-
-        profile.end()
-        logs = None
-        self.epoch += 1
         done_training = self.global_step >= config['total_timesteps']
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
@@ -417,11 +433,12 @@ class PuffeRL:
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
+            self.last_log_epoch = self.epoch
             profile.clear()
 
-        if self.epoch % config['checkpoint_interval'] == 0 or done_training:
+        if self.global_step % config['checkpoint_interval'] == 0 or done_training:
             self.save_checkpoint()
-            self.msg = f'Checkpoint saved at update {self.epoch}'
+            self.msg = f'Checkpoint saved at update {self.global_step}'
 
         return logs
 
@@ -440,6 +457,7 @@ class PuffeRL:
         agent_steps = int(dist_sum(self.global_step, device))
         logs = {
             'SPS': dist_sum(self.sps, device),
+            'EPS': dist_sum(self.eps, device),
             'agent_steps': agent_steps,
             'uptime': time.time() - self.start_time,
             'epoch': int(dist_sum(self.epoch, device)),
@@ -503,6 +521,7 @@ class PuffeRL:
             c1='[cyan]', c2='[white]', b1='[bright_cyan]', b2='[bright_white]'):
         config = self.config
         sps = dist_sum(self.sps, config['device'])
+        eps = dist_sum(self.eps, config['device'])
         agent_steps = dist_sum(self.global_step, config['device'])
         if torch.distributed.is_initialized():
            if torch.distributed.get_rank() != 0:
@@ -541,7 +560,8 @@ class PuffeRL:
         s.add_row(f'{c2}Params', abbreviate(self.model_size, b2, c2))
         s.add_row(f'{c2}Steps', abbreviate(agent_steps, b2, c2))
         s.add_row(f'{c2}SPS', abbreviate(sps, b2, c2))
-        s.add_row(f'{c2}Epoch', f'{b2}{self.epoch}')
+        s.add_row(f'{c2}EPS', abbreviate(eps, b2, c2))
+        s.add_row(f'{c2}Gradient_steps', f'{b2}{self.epoch}')
         s.add_row(f'{c2}Uptime', duration(self.uptime, b2, c2))
         s.add_row(f'{c2}Remaining', remaining)
 

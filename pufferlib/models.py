@@ -33,11 +33,13 @@ class SoftQNetwork(nn.Module):
             np.array(env.single_observation_space.shape).prod() + np.prod(env.single_action_space.shape),
             hidden_size,
         )
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc3 = nn.Linear(hidden_size, 1)
 
     def forward(self, x, a):
         x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
@@ -50,6 +52,7 @@ class Actor(nn.Module):
     def __init__(self, env, hidden_size=128):
         super().__init__()
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.fc_mean = nn.Linear(hidden_size, np.prod(env.single_action_space.shape))
         self.fc_logstd = nn.Linear(hidden_size, np.prod(env.single_action_space.shape))
         # action rescaling
@@ -70,6 +73,7 @@ class Actor(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
         mean = self.fc_mean(x)
         log_std = self.fc_logstd(x)
         log_std = torch.tanh(log_std)
@@ -81,7 +85,7 @@ class Actor(nn.Module):
         mean, log_std = self(x)
 
         y = torch.tanh(mean)
-        return y * self.action_scale + self.action_bias #deterministic
+        return y * self.action_scale + self.action_bias
         #std = log_std.exp()
         #   normal = torch.distributions.Normal(mean, std)
         #  x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
