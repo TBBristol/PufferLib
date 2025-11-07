@@ -127,6 +127,12 @@ class PuffeRL:
           #  self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
            # pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
+        if config['compile']:
+            self.actor = torch.compile(self.actor, mode=config['compile_mode'])
+            self.qf1 = torch.compile(self.qf1, mode=config['compile_mode'])
+            self.qf2 = torch.compile(self.qf2, mode=config['compile_mode'])
+     
+
         from pufferlib.models import SoftQNetwork, Actor
         hidden_size = config['hidden_size']
         self.actor = Actor(vecenv.driver_env, hidden_size).to(device)
@@ -185,6 +191,8 @@ class PuffeRL:
         self.losses = {}
 
         self.last_log_epoch = 0
+        self.start_time = time.time()
+        self.runtime = 0
 
         # Dashboard
         models = [self.actor, self.qf1, self.qf2, self.qf1_target, self.qf2_target]
@@ -339,10 +347,10 @@ class PuffeRL:
          
             
             if self.buffer_full:
-                row_idx = np.random.randint(0, self.segments, size=self.minibatch_size)
+                row_idx = torch.randint(0, self.segments, (self.minibatch_size,), device=device)
             else:
-                row_idx = np.random.randint(1, self.pos, size=self.minibatch_size)
-            agent_idx = np.random.randint(0, self.total_agents, size=self.minibatch_size)
+                row_idx = torch.randint(1, self.pos, (self.minibatch_size,),device=device)
+            agent_idx = torch.randint(0, self.total_agents, (self.minibatch_size,),device=device)
 
             mb_obs = self.observations[row_idx, agent_idx]
             mb_next_obs = self.next_observations[row_idx, agent_idx]
@@ -425,7 +433,10 @@ class PuffeRL:
             logs = None
             self.epoch += 1
 
-        done_training = self.global_step >= config['total_timesteps']
+        curr_time = time.time()
+        self.runtime = curr_time - self.start_time
+
+        done_training = self.global_step >= config['total_timesteps'] or self.runtime > config['max_runtime']
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
@@ -904,12 +915,13 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
-    while pufferl.global_step < train_config['total_timesteps']:
+    while pufferl.global_step < train_config['total_timesteps'] and pufferl.runtime < args['train']['max_runtime']:
         if train_config['device'] == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
         pufferl.evaluate()
         if train_config['device'] == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
+            
         logs = pufferl.train()
 
         if logs is not None:
@@ -1008,7 +1020,7 @@ def sweep(args=None, env_name=None):
     sweep = sweep_cls(args['sweep'])
     points_per_run = args['sweep']['downsample']
     target_key = f'environment/{args["sweep"]["metric"]}'
-    for i in range(args['max_runs']):
+    for i in range(args['max-runs']):
         seed = time.time_ns() & 0xFFFFFFFF
         random.seed(seed)
         np.random.seed(seed)
