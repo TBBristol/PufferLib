@@ -116,6 +116,7 @@ class Actor(nn.Module):
         x = F.relu(self.fc2(x))
         if self.is_continuous:
             mean = self.fc_mean(x)
+            mean = torch.clamp(mean, -10,10) #shouldnt be needed but had a nan crash so
             log_std = self.fc_logstd(x)
             log_std = torch.tanh(log_std)
             log_std = LOG_STD_MIN + 0.5 * (LOG_STD_MAX - LOG_STD_MIN) * (log_std + 1)  # From SpinUp / Denis Yarats
