@@ -18,7 +18,7 @@ class SoftQNetwork(nn.Module):
                 pufferlib.spaces.MultiDiscrete)
         self.is_continuous = isinstance(env.single_action_space,
                 pufferlib.spaces.Box)
-         try:
+        try:
             self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
         except:
             self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
@@ -48,7 +48,7 @@ class SoftQNetwork(nn.Module):
             self.fc3 = nn.Linear(hidden_size, num_atns)
         
 
-    def forward(self, x, a):
+    def forward(self, x, a=None):
         if self.is_continuous:
             x = torch.cat([x, a], 1)
         x = F.relu(self.fc1(x))

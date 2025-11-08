@@ -160,7 +160,7 @@ class PuffeRL:
             if self.is_continuous:
                 self.target_entropy = -torch.prod(torch.Tensor(atn_space.shape).to(device)).item()
             else:
-                n_act = sum(atn_space.n)
+                n_act = atn_space.n
                 self.target_entropy = -torch.log(torch.tensor(float(n_act), device=device))
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
             self.alpha = self.log_alpha.exp().item()
@@ -371,33 +371,66 @@ class PuffeRL:
             
             
             with torch.no_grad():
-                profile('train_actor_forward', epoch)
-                next_state_actions, next_state_logpi, _ = self.actor.get_action(mb_next_obs)
-                profile('train_q_forward', epoch)
-                qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
-                qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
-                next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
 
-            qf1_a_values = self.qf1(mb_obs, mb_actions)
-            qf2_a_values = self.qf2(mb_obs, mb_actions)
+                profile('train_actor_forward', epoch)
+                next_state_actions, next_state_logpi, next_state_action_probs = self.actor.get_action(mb_next_obs)
+
+                profile('train_q_forward', epoch)
+                if self.is_continuous:
+                    qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
+                    qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
+                    min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
+                    next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
+
+                else:
+                    qf1_next_target = self.qf1_target(mb_next_obs)
+                    qf2_next_target = self.qf2_target(mb_next_obs)
+                    min_qf_next_target = next_state_action_probs*(torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi)
+                    min_qf_next_target = min_qf_next_target.sum(dim=1)
+                    next_q_value = mb_rewards.squeeze(1) + (1 - mb_terminals.squeeze(1)) * self.gamma * min_qf_next_target
+
+
+
+
+            if self.is_continuous:
+                qf1_a_values = self.qf1(mb_obs, mb_actions)
+                qf2_a_values = self.qf2(mb_obs, mb_actions)
+            else:
+                qf1_values = self.qf1(mb_obs)
+                qf2_values = self.qf2(mb_obs)
+                qf1_a_values = qf1_values.gather(1, mb_actions.long().unsqueeze(1)).view(-1)  
+                qf2_a_values = qf2_values.gather(1, mb_actions.long().unsqueeze(1)).view(-1)
+
+
             qf1_loss = torch.nn.functional.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = torch.nn.functional.mse_loss(qf2_a_values, next_q_value)
             qf_loss = qf1_loss + qf2_loss
 
+                             
             self.q_optimizer.zero_grad()
             qf_loss.backward()
             self.q_optimizer.step()
 
             if self.epoch % self.policy_freq == 0:
                 for _ in range(self.policy_freq):
+
                     profile('train_pol_actor_forward', epoch)
-                    pi, log_pi,_ = self.actor.get_action(mb_obs)
+                    pi, log_pi,action_probs = self.actor.get_action(mb_obs) #actoin probs for discrete, pi is action
+
                     profile('train_pol_q_forward', epoch)
-                    qf1_pi = self.qf1(mb_obs, pi)
-                    qf2_pi = self.qf2(mb_obs, pi)
+                    if self.is_continuous:
+                        qf1_pi = self.qf1(mb_obs, pi)
+                        qf2_pi = self.qf2(mb_obs, pi)
+                    else:
+                        qf1_pi = self.qf1(mb_obs)
+                        qf2_pi = self.qf2(mb_obs)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                    actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+                    if self.is_continuous:
+                        actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+                    else:
+                        actor_loss = (action_probs * ((self.alpha * log_pi) - min_qf_pi)).mean()
+
+
 
                     self.actor_optimizer.zero_grad()
                     actor_loss.backward()
@@ -409,7 +442,10 @@ class PuffeRL:
                         with torch.no_grad():
                             profile('train_tune_actor_forward', epoch)
                             _, log_pi, _ = self.actor.get_action(mb_obs)
-                        alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+                        if self.is_continuous:
+                            alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+                        else:
+                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).mean()
 
                         self.a_optimizer.zero_grad()
                         alpha_loss.backward()
