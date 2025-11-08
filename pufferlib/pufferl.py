@@ -68,6 +68,10 @@ class PuffeRL:
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
         self.total_agents = total_agents
+
+        self.is_continuous = isinstance(atn_space,
+                pufferlib.spaces.Box)
+
         
 
         
@@ -150,10 +154,14 @@ class PuffeRL:
         self.tau = config['tau']
         self.warmup = True
         
-        
+        #DOES NOT HANDLE MULTD yet? 
         if config['autotune']:
             self.autotune = True
-            self.target_entropy = -torch.prod(torch.Tensor(atn_space.shape).to(device)).item()
+            if self.is_continuous:
+                self.target_entropy = -torch.prod(torch.Tensor(atn_space.shape).to(device)).item()
+            else:
+                n_act = sum(atn_space.n)
+                self.target_entropy = -torch.log(torch.tensor(float(n_act), device=device))
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
             self.alpha = self.log_alpha.exp().item()
             self.a_optimizer = torch.optim.Adam([self.log_alpha], lr=config['q_lr'])
