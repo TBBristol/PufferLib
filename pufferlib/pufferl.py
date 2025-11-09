@@ -131,11 +131,7 @@ class PuffeRL:
           #  self.policy.forward_eval = torch.compile(policy, mode=config['compile_mode'])
            # pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
-        if config['compile']:
-            self.actor = torch.compile(self.actor, mode=config['compile_mode'])
-            self.qf1 = torch.compile(self.qf1, mode=config['compile_mode'])
-            self.qf2 = torch.compile(self.qf2, mode=config['compile_mode'])
-     
+          
 
         from pufferlib.models import SoftQNetwork, Actor
         hidden_size = config['hidden_size']
@@ -168,6 +164,20 @@ class PuffeRL:
         else:
             self.alpha = config['alpha']
             self.autotune = False
+
+        self.uncompiled_actor = self.actor
+
+        if config['compile']:
+            self.actor = torch.compile(self.actor, mode=config['compile_mode'])
+            self.actor.get_action = torch.compile(self.actor.get_action, mode=config['compile_mode'])
+            self.actor.get_action_eval = torch.compile(self.actor.get_action_eval, mode=config['compile_mode'])
+
+            self.qf1 = torch.compile(self.qf1, mode=config['compile_mode'])
+            self.qf2 = torch.compile(self.qf2, mode=config['compile_mode'])
+            self.qf1_target = torch.compile(self.qf1_target, mode=config['compile_mode'])
+            self.qf2_target = torch.compile(self.qf2_target, mode=config['compile_mode'])
+     
+
 
        
         # Logging
@@ -557,7 +567,7 @@ class PuffeRL:
         if os.path.exists(model_path):
             return model_path
 
-        torch.save(self.actor.state_dict(), model_path)
+        torch.save(self.uncompiled_actor.state_dict(), model_path)
 
         state = {
             'global_step': self.global_step,
