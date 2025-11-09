@@ -159,6 +159,7 @@ class PuffeRL:
 
             else:
                 n_act = atn_space.n
+                self.target_entropy_scale = config['target_entropy_scale']
                 self.target_entropy = - self.target_entropy_scale *(torch.log(1/torch.tensor(float(n_act), device=device)))
 
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
