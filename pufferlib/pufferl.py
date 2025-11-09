@@ -152,12 +152,15 @@ class PuffeRL:
         
         #DOES NOT HANDLE MULTD yet? 
         if config['autotune']:
+
             self.autotune = True
             if self.is_continuous:
                 self.target_entropy = -torch.prod(torch.Tensor(atn_space.shape).to(device)).item()
+
             else:
                 n_act = atn_space.n
-                self.target_entropy = -torch.log(torch.tensor(float(n_act), device=device))
+                self.target_entropy = - self.target_entropy_scale *(torch.log(1/torch.tensor(float(n_act), device=device)))
+
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
             self.alpha = self.log_alpha.exp().item()
             self.a_optimizer = torch.optim.Adam([self.log_alpha], lr=config['q_lr'])
@@ -453,17 +456,20 @@ class PuffeRL:
                             profile('train_tune_actor_forward', epoch)
                             _, log_pi, _ = self.actor.get_action(mb_obs)
                         if self.is_continuous:
-                            alpha_loss = (-self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+                            alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
                         else:
                             alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).mean()
-
+                         
                         self.a_optimizer.zero_grad()
                         alpha_loss.backward()
                         self.a_optimizer.step()
                         self.alpha = self.log_alpha.exp().item()
 
+
+
                         losses['alpha_loss'] = alpha_loss.item()
                         losses['alpha'] = self.alpha
+                                
 
 
             if self.epoch % self.target_network_update_freq == 0:
