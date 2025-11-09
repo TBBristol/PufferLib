@@ -442,7 +442,7 @@ class PuffeRL:
                     if self.is_continuous:
                         actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
                     else:
-                        actor_loss = (action_probs * ((self.alpha * log_pi) - min_qf_pi)).mean()
+                        actor_loss = (action_probs * ((self.alpha * log_pi) - min_qf_pi)).sum(dim=1).mean()
 
 
 
@@ -455,11 +455,11 @@ class PuffeRL:
                     if self.autotune:
                         with torch.no_grad():
                             profile('train_tune_actor_forward', epoch)
-                            _, log_pi, _ = self.actor.get_action(mb_obs)
+                            _, log_pi, action_probs = self.actor.get_action(mb_obs)
                         if self.is_continuous:
                             alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
                         else:
-                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).mean()
+                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).sum(dim=1).mean()
                          
                         self.a_optimizer.zero_grad()
                         alpha_loss.backward()
