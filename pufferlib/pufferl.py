@@ -72,6 +72,7 @@ class PuffeRL:
         self.is_continuous = isinstance(atn_space,
                 pufferlib.spaces.Box)
 
+
         
 
         
@@ -87,11 +88,11 @@ class PuffeRL:
         self.segments = segments
         device = config['device']
         self.observations = torch.zeros(segments, total_agents, *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            dtype=torch.float32,
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
         self.next_observations = torch.zeros(segments, total_agents, *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            dtype=torch.float32,
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
         self.actions = torch.zeros(segments, total_agents, *atn_space.shape, device=device,
@@ -108,7 +109,7 @@ class PuffeRL:
         #buffers to hold obs and actions until next step so it can align in the buffers above 
 
         self.obs_buf = torch.zeros(total_agents, *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            dtype=torch.float32,
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
         self.act_buf = torch.zeros(total_agents, *atn_space.shape, device=device,
@@ -262,8 +263,8 @@ class PuffeRL:
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
-            o = torch.as_tensor(o)
-            o_device = o.to(device)#, non_blocking=True)
+            o = torch.as_tensor(o, dtype=torch.float32)
+            o_device = torch.as_tensor(o, dtype=torch.float32, device = device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
 

@@ -85,6 +85,7 @@ class Actor(nn.Module):
             num_atns = env.single_action_space.n
 
 
+
         self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
 
@@ -93,7 +94,6 @@ class Actor(nn.Module):
             self.fc_logstd = nn.Linear(hidden_size, np.prod(env.single_action_space.shape))
         else:
             self.fc_logits = nn.Linear(hidden_size, num_atns)
-        
         if self.is_continuous:
             # action rescaling
             self.register_buffer(
