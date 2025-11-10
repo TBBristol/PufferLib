@@ -459,7 +459,7 @@ class PuffeRL:
                         if self.is_continuous:
                             alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
                         else:
-                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).mean()
+                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).sum(dim=1).mean()
 
                          
                         self.a_optimizer.zero_grad()
