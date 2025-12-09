@@ -54,7 +54,7 @@ void add_log(Hanoi* env) {
 // Required function
 void c_reset(Hanoi* env) {
     env->tick = 0;
-    memset(env->observations, 0, sizeof(int)*env->disks*env->pegs);
+    memset(env->observations, 0, sizeof(unsigned char)*env->disks*env->pegs);
     for (int i = 0; i < env->disks; i++) {
         OBS(i,0) = 1;
     }

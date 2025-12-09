@@ -18,6 +18,10 @@ class Hanoi(pufferlib.PufferEnv):
         self.pegs = pegs
         self.disks = disks
         self.max_timesteps = max_timesteps
+        if self.pegs < 3:
+            raise ValueError("pegs must be >= 3")
+        if self.disks < 3:
+            raise ValueError("disks must be >= 3")
 
         super().__init__(buf)
         self.c_envs = binding.vec_init(self.observations, self.actions, self.rewards,
