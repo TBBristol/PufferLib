@@ -152,7 +152,7 @@ void c_step(Hanoi* env) {
     if (valid_move(env)) {
         move_disk(env);
     }
-
+    
     if (env->tick >= env->max_timesteps) {
         env->terminals[0] = 1;
         env->rewards[0] = -1.0;
@@ -168,13 +168,15 @@ void c_step(Hanoi* env) {
         c_reset(env);
         return;
     }
+
+    env->rewards[0] -= 0.1;
 }
 
 // Required function. Should handle creating the client on first call
 void c_render(Hanoi* env) {
     if (!IsWindowReady()) {
         InitWindow(800, 600, "PufferLib Hanoi");
-        SetTargetFPS(5);
+        SetTargetFPS(1);      
     }
 
     // Standard across our envs so exiting is always the same
@@ -203,6 +205,10 @@ void c_render(Hanoi* env) {
     // Disk height and max width
     float disk_h = (H * 0.7) / D;                // stack fits vertically
     float max_disk_w = peg_spacing * 0.8;        // largest disk width
+                                                 //
+    DrawRectangle(0, H*0.9, W, H*0.1, (Color){30, 30, 30, 255}); //base
+                                                                 //
+    DrawText(TextFormat("t = %d", env->tick), 20, 20, 20, RAYWHITE);
 
     // Draw disks (from largest to smallest so smaller drawn on top)
     for (int d = D - 1; d >= 0; d--) {
@@ -223,12 +229,18 @@ void c_render(Hanoi* env) {
 
                 int y = (int)(H * 0.9 - (stack_index + 1) * disk_h);
 
+                Color disk_color = ColorFromHSV(
+                    220 - 180.0f * d / (D - 1),  // blue → red
+                    0.7f,
+                    0.9f
+                );
+
                 DrawRectangle(
                     x_center - (int)(w / 2),
                     y,
                     (int)w,
                     (int)h,
-                    (Color){80 + d*10, 120 + d*10, 200 - d*10, 255}
+                    disk_color
                 );
             }
         }
