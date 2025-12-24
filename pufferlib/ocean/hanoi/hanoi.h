@@ -58,6 +58,8 @@ void c_reset(Hanoi* env) {
     for (int i = 0; i < env->disks; i++) {
         OBS(i,0) = 1;
     }
+    env->move.from = -1;
+    env->move.to = -1;
 }
 
 
@@ -138,6 +140,37 @@ static inline bool is_goal(Hanoi *env) {
     return true;
 }
 
+/*Following for generating trajectories*/
+void goal_set(Hanoi *env) {
+    memset(env->observations, 0, sizeof(unsigned char)*env->disks*env->pegs);
+    int goal_peg = env->pegs - 1;
+    for (int d = 0; d < env->disks; d++) {
+        OBS(d, goal_peg) = 1;
+    }
+}
+
+void sample_valid_move(Hanoi *env) {
+    while (1) {
+        int p = rand() % env->pegs;
+        int q = rand() % env->pegs;
+        if (p == q)
+            continue;
+
+        env->move.from = p;
+        env->move.to   = q;
+
+        if (valid_move(env))
+            return;
+    }
+}
+
+void shuffle_moves(Hanoi *env, int n) {
+    for (int i = 0; i < n; i++) {
+        sample_valid_move(env);
+        move_disk(env);
+    }
+}
+
 
 // Required function
 void c_step(Hanoi* env) {
@@ -192,6 +225,7 @@ void c_render(Hanoi* env) {
 
     int P = env->pegs;
     int D = env->disks;
+    bool manual_mode = IsKeyDown(KEY_LEFT_SHIFT);
 
     // Peg spacing (evenly spaced across width)
     float peg_spacing = W / (float)(P + 1);
@@ -200,6 +234,15 @@ void c_render(Hanoi* env) {
     for (int p = 0; p < P; p++) {
         int x = (int)((p + 1) * peg_spacing);
         DrawLine(x, H * 0.15, x, H * 0.9, RAYWHITE);
+
+        if (manual_mode) {
+              // Show 1-based labels so they match the numeric keys
+              DrawText(TextFormat("%d", p + 1),
+                       x - MeasureText("0", 20) / 2,
+                       (int)(H * 0.12f),
+                       20,
+                       RAYWHITE);
+          }
     }
 
     // Disk height and max width
@@ -209,6 +252,21 @@ void c_render(Hanoi* env) {
     DrawRectangle(0, H*0.9, W, H*0.1, (Color){30, 30, 30, 255}); //base
                                                                  //
     DrawText(TextFormat("t = %d", env->tick), 20, 20, 20, RAYWHITE);
+    if (manual_mode) {
+         if (env->move.from < 0) {
+          DrawText("Manual mode: select source peg",
+                   20, 50, 20, RAYWHITE);
+      } else if (env->move.to < 0) {
+          DrawText(TextFormat("Manual mode: selected peg %d, choose target",
+                              env->move.from),
+                   20, 50, 20, RAYWHITE);
+      } else {
+          DrawText(TextFormat("Manual mode: selected peg %d, target peg %d",
+                              env->move.from, env->move.to),
+                   20, 50, 20, RAYWHITE);
+      }
+
+    }
 
     // Draw disks (from largest to smallest so smaller drawn on top)
     for (int d = D - 1; d >= 0; d--) {
