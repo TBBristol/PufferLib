@@ -8,7 +8,7 @@ from pufferlib.ocean.hanoi import binding
 
 class Hanoi(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, pegs = 3,disks=3,
-                 max_timesteps = 250, celebrate_ticks=11111111111):
+                 max_timesteps = 250, celebrate_ticks=1):
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
             shape=(disks*pegs,), dtype=np.uint8)
         self.single_action_space = gymnasium.spaces.Discrete(pegs*(pegs-1))
