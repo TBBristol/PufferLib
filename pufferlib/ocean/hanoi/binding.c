@@ -7,6 +7,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->pegs = unpack(kwargs, "pegs");
     env->disks = unpack(kwargs, "disks");
     env->max_timesteps = unpack(kwargs, "max_timesteps");
+    env->celebrate_ticks = unpack(kwargs, "celebrate_ticks");
     return 0;
 }
 

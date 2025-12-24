@@ -24,6 +24,8 @@ int main() {
     env.terminals = (unsigned char*)calloc(1, sizeof(unsigned char));
     env.max_timesteps = 100;
     env.tick = 0;
+    env.celebrate_ticks = 1;
+    env.celebrate_tick = 0;
 
     int pending_from = -1;
     int pending_to   = -1;

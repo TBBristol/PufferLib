@@ -8,7 +8,7 @@ from pufferlib.ocean.hanoi import binding
 
 class Hanoi(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, pegs = 3,disks=3,
-                 max_timesteps = 250):
+                 max_timesteps = 250, celebrate_ticks=11111111111):
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
             shape=(disks*pegs,), dtype=np.uint8)
         self.single_action_space = gymnasium.spaces.Discrete(pegs*(pegs-1))
@@ -22,10 +22,11 @@ class Hanoi(pufferlib.PufferEnv):
             raise ValueError("pegs must be >= 3")
         if self.disks < 3:
             raise ValueError("disks must be >= 3")
+        self.celebrate_ticks = celebrate_ticks
 
         super().__init__(buf)
         self.c_envs = binding.vec_init(self.observations, self.actions, self.rewards,
-            self.terminals, self.truncations, num_envs, seed, pegs= self.pegs, disks=self.disks, max_timesteps=self.max_timesteps)
+            self.terminals, self.truncations, num_envs, seed, pegs= self.pegs, disks=self.disks, max_timesteps=self.max_timesteps, celebrate_ticks = self.celebrate_ticks)
  
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)

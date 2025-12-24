@@ -39,6 +39,8 @@ typedef struct {
     int tick;
     int max_timesteps;
     Move move;
+    int celebrate_ticks;
+    int celebrate_tick;
 } Hanoi;
 
 #define OBS(d,p) env->observations[d*env->pegs+p]
@@ -198,6 +200,7 @@ void c_step(Hanoi* env) {
         env->terminals[0] = 1;
         env->rewards[0] = 1.0;
         add_log(env);
+        env->celebrate_tick = env->celebrate_ticks; //tells c_render to draw goal
         c_reset(env);
         return;
     }
@@ -226,6 +229,18 @@ void c_render(Hanoi* env) {
     int P = env->pegs;
     int D = env->disks;
     bool manual_mode = IsKeyDown(KEY_LEFT_SHIFT);
+
+    if (env->celebrate_tick > 0) {
+          const char *goal_txt = "GOAL!";
+          int font = 48;
+          int text_w = MeasureText(goal_txt, font);
+          DrawText(goal_txt,
+                   W / 2 - text_w / 2,
+                   (int)(H * 0.45f),
+                   font,
+                   GOLD);
+          env->celebrate_tick--;
+      }
 
     // Peg spacing (evenly spaced across width)
     float peg_spacing = W / (float)(P + 1);
