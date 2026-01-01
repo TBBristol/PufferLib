@@ -87,6 +87,7 @@ class Hanoi(pufferlib.PufferEnv):
 
 from pathlib import Path
 import torch
+import cloudpickle
 
 
 def collect_reverse_dataset(env, traj_len: int, shard_traj_count: int, num_shards: int, out_dir: str):
@@ -113,7 +114,8 @@ def collect_reverse_dataset(env, traj_len: int, shard_traj_count: int, num_shard
 
               if filled == shard_traj_count:
                   shard_path = out_dir / f"hanoi_reverse_T{traj_len+1}_obs{obs_dim}_{shard_idx:04d}.pkl"
-                  torch.save(shard, shard_path)        # torch.save ⇒ pickle file
+                  with shard_path.open("wb") as f:
+                    cloudpickle.dump(shard.clone(), f)        # torch.save ⇒ pickle file
                   shard_idx += 1
                   filled = 0
                   if shard_idx == num_shards:
@@ -121,7 +123,8 @@ def collect_reverse_dataset(env, traj_len: int, shard_traj_count: int, num_shard
 
       if filled > 0:
           shard_path = out_dir / f"hanoi_reverse_T{traj_len+1}_obs{obs_dim}_{shard_idx:04d}.pkl"
-          torch.save(shard[:filled].clone(), shard_path)
+          with shard_path.open("wb") as f:
+              cloudpickle.dump(shard[:filled].clone(), f)
 
 
 if __name__ == '__main__':
@@ -143,7 +146,7 @@ if __name__ == '__main__':
     #     i += 1
 
     # print('Hanoi SPS:', int(steps / (time.time() - start)))
-    traj_len = 10
+    traj_len = 15
     shard_traj_count = 1500000
     num_shards = 5
     out_dir = "hanoi_reverse"
