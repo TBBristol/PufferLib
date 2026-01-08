@@ -34,12 +34,13 @@ def run_test(num_envs=4, steps=100000, seed=0):
             print(f"encoder loss: {encoder.last_loss:.6f}")
             logged_updates += 1
 
-    cells = tracker["cell_store"]["cells"]
-    print("cells stored:", len(cells))
-    if cells:
-        keys = list(cells.keys())
+    cell_store = tracker["cell_store"]
+    snapshot = cell_store.copy_cells()
+    print("cells stored:", len(snapshot))
+    if snapshot:
+        keys = list(snapshot.keys())
         for key in keys[:5]:
-            cell = cells[key]
+            cell = snapshot[key]
             restored_obs, _ = ge.restore_cell(tracker["vecenv"], cell)
             restored_key, _ = ge.state_to_cell(restored_obs)
             print(
@@ -56,7 +57,7 @@ def run_test(num_envs=4, steps=100000, seed=0):
     return_env = GoExploreResetWrapper(Pong(num_envs=num_envs, seed=seed + 1))
     stats = ge.go_explore_loop(
         return_env,
-        tracker["cell_store"],
+        cell_store,
         iterations=2,
         explore_steps=10,
         encoder_update_interval=1000,

@@ -2,6 +2,7 @@ import hashlib
 import time
 
 import numpy as np
+import multiprocessing
 import torch
 from torch import nn
 
@@ -11,6 +12,97 @@ import pufferlib.spaces as pspaces
 
 _STATE_ENCODER = None
 _KEY_DECIMALS = 4
+
+
+def _add_cell_unlocked(cells, cell):
+    key = cell["key"]
+    stored = cells.get(key)
+
+    if stored is None:
+        cells[key] = cell
+        return True, cell
+
+    if prefer_highest_reward(stored, cell):
+        stored["visits"] += 1
+        stored["updated_at"] = time.time()
+        cell["visits"] = stored["visits"]
+        cell["selected"] = 0
+        cell["discoveries"] = 0
+        cell["created_at"] = stored["created_at"]
+        cell["updated_at"] = time.time()
+        cells[key] = cell
+        return True, cell
+
+    stored["visits"] += 1
+    stored["updated_at"] = time.time()
+    return False, stored
+
+
+def _best_cell_unlocked(cells, score_fn=None):
+    if not cells:
+        return None
+
+    if score_fn is None:
+        score_fn = lambda cell: cell["cumulative_reward"]
+
+    return max(cells.values(), key=score_fn)
+
+
+class CellStore:
+    """Container for Go-Explore cells with optional locking."""
+
+    def __init__(self, cells=None, lock=None):
+        self.cells = cells or {}
+        self.lock = lock
+
+    def __len__(self):
+        return len(self.cells)
+
+    def __contains__(self, key):
+        return key in self.cells
+
+    def get(self, key, default=None):
+        return self.cells.get(key, default)
+
+    def values(self):
+        return self.cells.values()
+
+    def items(self):
+        return self.cells.items()
+
+    def keys(self):
+        return self.cells.keys()
+
+    def copy_cells(self):
+        return dict(self.cells)
+
+    def add_cell(self, cell):
+        if self.lock:
+            with self.lock:
+                return _add_cell_unlocked(self.cells, cell)
+        return _add_cell_unlocked(self.cells, cell)
+
+    def best(self, score_fn=None):
+        if self.lock:
+            with self.lock:
+                return _best_cell_unlocked(self.cells, score_fn)
+        return _best_cell_unlocked(self.cells, score_fn)
+
+    def sample(self, sampler):
+        if self.lock:
+            with self.lock:
+                return sampler(self.cells)
+        return sampler(self.cells)
+
+
+class SharedCellStore(CellStore):
+    """Process-safe cell store using multiprocessing.Manager."""
+
+    def __init__(self):
+        manager = multiprocessing.Manager()
+        cells = manager.dict()
+        lock = manager.RLock()
+        super().__init__(cells=cells, lock=lock)
 
 
 def make_env_state(seed=None, extras=None):
@@ -51,47 +143,29 @@ def prefer_highest_reward(existing, candidate, reward_eps=1e-6):
 
 
 def make_cell_store():
-    return {"cells": {}}
+    return CellStore()
+
+
+def make_shared_cell_store():
+    return SharedCellStore()
 
 
 def add_cell(store, cell):
-    key = cell["key"]
-    cells = store["cells"]
-    stored = cells.get(key)
-
-    if stored is None:
-        cells[key] = cell
-        return True, cell
-
-    if prefer_highest_reward(stored, cell):
-        stored["visits"] += 1
-        stored["updated_at"] = time.time()
-        cell["visits"] = stored["visits"]
-        cell["selected"] = 0
-        cell["discoveries"] = 0
-        cell["created_at"] = stored["created_at"]
-        cell["updated_at"] = time.time()
-        cells[key] = cell
-        return True, cell
-
-    stored["visits"] += 1
-    stored["updated_at"] = time.time()
-    return False, stored
+    if isinstance(store, CellStore):
+        return store.add_cell(cell)
+    return _add_cell_unlocked(store["cells"], cell)
 
 
 def get_cell(store, key):
+    if isinstance(store, CellStore):
+        return store.get(key)
     return store["cells"][key]
 
 
 def best_cell(store, score_fn=None):
-    cells = store["cells"]
-    if not cells:
-        return None
-
-    if score_fn is None:
-        score_fn = lambda cell: cell["cumulative_reward"]
-
-    return max(cells.values(), key=score_fn)
+    if isinstance(store, CellStore):
+        return store.best(score_fn)
+    return _best_cell_unlocked(store["cells"], score_fn)
 
 
 def reshape_per_env(array, num_envs, agents_per_env):
@@ -411,42 +485,63 @@ def tracker_step(tracker, actions):
     return observations, rewards, terminals, truncations, infos
 
 
-def sample_uniform_cell(cell_store):
-    cells = list(cell_store["cells"].values())
+def _sample_cells(cell_store, sampler_fn):
+    if isinstance(cell_store, CellStore):
+        return cell_store.sample(sampler_fn)
+    return sampler_fn(cell_store["cells"])
+
+
+def _cell_count(cell_store):
+    if isinstance(cell_store, CellStore):
+        return len(cell_store)
+    return len(cell_store["cells"])
+
+
+def _sample_with_weights(cells, weight_fn):
     if not cells:
         return None
 
-    weights = np.array([1.0 / (1.0 + cell["visits"]) for cell in cells], dtype=np.float64)
-    total = weights.sum()
-    if total > 0:
-        weights /= total
-        idx = np.random.choice(len(cells), p=weights)
-    else:
-        idx = np.random.randint(len(cells))
+    keys = list(cells.keys())
+    entries = []
+    weights = []
+    for key in keys:
+        cell = cells[key]
+        entries.append((key, cell))
+        weights.append(weight_fn(cell))
 
-    cells[idx]["visits"] += 1
-    cells[idx]["selected"] += 1
-    return cells[idx]
+    weights = np.asarray(weights, dtype=np.float64)
+    total = weights.sum()
+    if not np.isfinite(total) or total <= 0:
+        idx = np.random.randint(len(entries))
+    else:
+        weights /= total
+        idx = np.random.choice(len(entries), p=weights)
+
+    key, cell = entries[idx]
+    cell["visits"] += 1
+    cell["selected"] += 1
+    cells[key] = cell
+    return cell
+
+
+def sample_uniform_cell(cell_store):
+    def _sampler(cells):
+        return _sample_with_weights(cells, lambda cell: 1.0 / (1.0 + cell["visits"]))
+
+    return _sample_cells(cell_store, _sampler)
 
 
 def sample_weighted_cell(cell_store, reward_eps=1e-3):
-    cells = list(cell_store["cells"].values())
-    if not cells:
-        return None
+    def _sampler(cells):
+        def _weight(cell):
+            w = cell["cumulative_reward"] / (1 + cell["visits"])
+            if not np.isfinite(w) or w <= 0:
+                return reward_eps
+            return w
 
-    weights = []
-    for cell in cells:
-        w = cell["cumulative_reward"] / (1 + cell["visits"])
-        if not np.isfinite(w) or w <= 0:
-            w = reward_eps
-        weights.append(w)
+        return _sample_with_weights(cells, _weight)
 
-    weights = np.asarray(weights, dtype=np.float64)
-    weights /= weights.sum()
-    idx = np.random.choice(len(cells), p=weights)
-    cells[idx]["visits"] += 1
-    cells[idx]["selected"] += 1
-    return cells[idx]
+    return _sample_cells(cell_store, _sampler)
 
 
 def random_action_sampler(vecenv):
@@ -498,16 +593,16 @@ def go_explore_loop(return_env, cell_store, iterations=1, explore_steps=100,
 
         env_seed = (cell.get("env_state") or {}).get("seed")
         if env_seed is None:
-            results.append({"iteration": i, "cells": len(cell_store["cells"]), "status": "no_seed"})
+            results.append({"iteration": i, "cells": _cell_count(cell_store), "status": "no_seed"})
             continue
 
         matched = return_to_cell(tracker, cell)
         if not matched:
-            results.append({"iteration": i, "cells": len(cell_store["cells"]), "status": "return_failed"})
+            results.append({"iteration": i, "cells": _cell_count(cell_store), "status": "return_failed"})
             continue
 
         explore_from_cell(tracker, explore_steps, action_sampler)
-        results.append({"iteration": i, "cells": len(cell_store["cells"]), "status": "ok"})
+        results.append({"iteration": i, "cells": _cell_count(cell_store), "status": "ok"})
 
     return results
 
