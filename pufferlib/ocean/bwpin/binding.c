@@ -5,7 +5,7 @@ static PyObject* vec_goal_set(PyObject* self, PyObject* args);
 static PyObject* vec_shuffle_moves(PyObject* self, PyObject* args);
 static PyObject* vec_shuffle_all(PyObject* self, PyObject* args);
 
-#define Env Hanoi
+#define Env Bwpin
 
 #define MY_METHODS \
       {"vec_goal_set", vec_goal_set, METH_VARARGS, "Set env_id to the solved goal state"}, \
@@ -49,7 +49,7 @@ static PyObject* vec_goal_set(PyObject* self, PyObject* args) {
           PyErr_SetString(PyExc_ValueError, "env_id out of range");
           return NULL;
       }
-      goal_set((Hanoi*)vec->envs[env_id]);
+      goal_set((Bwpin*)vec->envs[env_id]);
       Py_RETURN_NONE;
   }
 
@@ -78,7 +78,7 @@ static PyObject* vec_shuffle_moves(PyObject* self, PyObject* args) {
         PyErr_SetString(PyExc_ValueError, "num_moves must be >= 0");
         return NULL;
     }
-    shuffle_moves((Hanoi*)vec->envs[env_id], (int)moves);
+    shuffle_moves((Bwpin*)vec->envs[env_id], (int)moves);
     Py_RETURN_NONE;
 }
 
@@ -102,7 +102,7 @@ static PyObject* vec_shuffle_all(PyObject* self, PyObject* args) {
              return NULL;
          }
          for (int i = 0; i < vec->num_envs; ++i) {
-             shuffle_moves((Hanoi*)vec->envs[i], (int)moves);
+             shuffle_moves((Bwpin*)vec->envs[i], (int)moves);
          }
          Py_RETURN_NONE;
      }

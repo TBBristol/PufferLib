@@ -9,8 +9,8 @@ from pufferlib.ocean.bwpin import binding
 class Bwpin(pufferlib.PufferEnv):
     def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, pegs = 3,max_timesteps = 250, celebrate_ticks=1):
         self.single_observation_space = gymnasium.spaces.Box(low=-1, high=1,
-            shape=((pegs *2)+1,), dtype=np.uint8)
-        self.single_action_space = gymnasium.spaces.Discrete((pegs*2 +1) *2) -2)) #each space both directions minus two outsides which jsut go one dir
+            shape=((pegs *2)+1,), dtype=np.int8)
+        self.single_action_space = gymnasium.spaces.Discrete((((pegs*2 +1) *2) -2)) #each space both directions minus two outsides which jsut go one dir
         self.render_mode = render_mode
         self.num_agents = num_envs
         self.log_interval = log_interval

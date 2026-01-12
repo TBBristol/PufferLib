@@ -163,7 +163,7 @@ MAKE_FUNCTIONS = {
     'spaces': make_spaces,
     'multiagent': make_multiagent,
     'slimevolley': 'SlimeVolley',
-    'bwpin: BwPin',
+    'bwpin': 'Bwpin',
 }
 
 def env_creator(name='squared', *args, **kwargs):
