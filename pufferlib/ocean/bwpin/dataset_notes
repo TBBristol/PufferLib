@@ -1,0 +1,12 @@
+Store each chunk as a single PyTorch tensor with shape [num_trajectories, trajectory_length,
+    observation_dim]; axis 0 indexes trajectories, axis 1 is time, axis 2 is the flattened observation.
+  - Use integer-encoded observations (dtype torch.int64); training casts to float32, so no normalization
+    is needed, but downstream configs must know the observation dimension.
+  - All .pkl files live in one directory; ContrastiveDataset just iterates over every file ending in .pkl
+    and cloudpickle.loads it. No extra metadata is required.
+  - Ensure your model/config input size matches the observation dimension (e.g., edit
+    LNDenseNet.input_size if it isn’t 54). Swap in the correct env/problem generator bindings if you plan
+    to train/eval beyond Rubik’s.
+  - Each file is read wholly into RAM, shuffled, then batched, so keep individual pickle sizes within your
+    memory budget (Rubik shards are ~2.2 GB from bs = 2048*128; lower bs or split tensors further if
+    needed).
