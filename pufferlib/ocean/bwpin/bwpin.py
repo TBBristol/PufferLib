@@ -51,22 +51,7 @@ class Bwpin(pufferlib.PufferEnv):
     def set_goal(self, env_id):
         binding.vec_goal_set(self.c_envs, env_id)
 
-    def reverse_trajectory(self, env_id, num_moves):
-        """
-        Reverses the trajectory of the given environment and retyrbs as tensor[num_moves+1, obs_dim]
-        FOR SINGLE ENV
-        """
-        set_goal(env_id)
-
-        obs_dim - self.single_observation_space.shape[0]
-        traj = torch.empty((num_moves+1, obs_dim), dtype=torch.int64)
-
-        traj[0].copy_(torch.from_numpy(self.observations[env_id]).to(torch.int64))
-        for step in range(1, num_moves+1):
-            binding.vec_shuffle_moves(self.c_envs, env_id, 1)
-            traj[step].copy_(torch.from_numpy(self.observations[env_id]).to(torch.int64))
-
-        return traj
+   
 
     def vec_reverse_trajectory(self, num_moves):
         for i in range(self.num_agents):
