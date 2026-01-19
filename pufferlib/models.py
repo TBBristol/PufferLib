@@ -8,6 +8,63 @@ import pufferlib.emulation
 import pufferlib.pytorch
 import pufferlib.spaces
 
+class CellEncoder(nn.Module):
+    def __init__(self, env, hidden_size=128):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            self.encoder = nn.Linear(input_size, self.hidden_size)
+        else:
+            num_obs = np.prod(env.single_observation_space.shape)
+            self.encoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
+                nn.GELU(),
+            )
+            
+    def forward_eval(self, observations, state=None):
+        hidden = self.encode_observations(observations, state=state)
+        return hidden
+
+    def forward(self, observations, state=None):
+        return self.forward_eval(observations, state)
+
+    def encode_observations(self, observations, state=None):
+        '''Encodes a batch of observations into hidden states. Assumes
+        no time dimension (handled by LSTM wrappers).'''
+        batch_size = observations.shape[0]
+        if self.is_dict_obs:
+            observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
+            observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
+        else: 
+            observations = observations.view(batch_size, -1)
+        return self.encoder(observations.float())
+
+class SimHash64(nn.Module):
+      def __init__(self, in_dim, seed=0):
+          super().__init__()
+          g = torch.Generator()
+          g.manual_seed(seed)
+          # Fixed random hyperplanes for SimHash (deterministic with seed)
+          self.register_buffer("proj", torch.randn(in_dim, 64, generator=g))
+
+      def forward(self, x):
+          # x: [B, in_dim] float
+          signs = (x @ self.proj) > 0  # [B, 64] bool
+          bits = signs.to(torch.uint64)
+          shifts = torch.arange(64, device=x.device, dtype=torch.uint64)
+          return (bits << shifts).sum(dim=1)
+
 
 class Default(nn.Module):
     '''Default PyTorch policy. Flattens obs and applies a linear layer.

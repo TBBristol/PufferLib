@@ -96,6 +96,11 @@ class Serial:
         self.initialized = False
         self.flag = RESET
 
+        #FOR DETERMINISTIC SEEDS
+        self.epiode_seeds = np.full(self.num_envs, -1, dtype=np.int64) #acess curret seed
+        self.seed_counter = 0 #seed counter to incerment for a new seed
+        
+
     def _avg_infos(self):
         infos = {}
         for e in self.infos:
@@ -120,8 +125,13 @@ class Serial:
         for i, env in enumerate(self.envs):
             if seed is None:
                 ob, i = env.reset()
+                env_seed = self.seed_counter
+                self.seed_counter += 1
+                self.episode_seeds[i] = env_seed
             else:
-                ob, i = env.reset(seed=seed+i)
+                env_seed = seed+i
+                ob, i = env.reset(env_seed)
+                self.episode_seeds[i] = env_seed
                
             if isinstance(i, list):
                 infos.extend(i)
@@ -142,7 +152,11 @@ class Serial:
             end = ptr + self.agents_per_env[idx]
             atns = actions[ptr:end]
             if env.done:
-                o, i = env.reset()
+                 choose a deterministic seed for the new episode
+                env_seed = self.seed_counter
+                self.seed_counter += 1
+                o, i = env.reset(seed=env_seed)
+                self.episode_seeds[idx] = env_seed
             else:
                 o, r, d, t, i = env.step(atns)
 

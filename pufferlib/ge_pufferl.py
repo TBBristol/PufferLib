@@ -295,7 +295,7 @@ class PuffeRL:
         from pufferlib.models import CellEncoder, SimHash64
 
         self.cell_encoder = CellEncoder(self.vecenv.driver_env)
-        self.hash_encoder = SimHash64(self.cell_encoder.hidden_size)
+        self.hash_encoder = SimHash64(self.cell_encoder.hidden_size, seed=config['hash_seed'])
         self.cell_store_capacity = config['cell_store_capacity']
         self.cell_store = CellStore(self.cell_store_capacity)
 
@@ -310,34 +310,7 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
-    def _seed_for_agent(self, agent_idx):
-        seeds = getattr(self.vecenv, 'last_seed', None)
-        if seeds is None:
-            return None
-
-        env_idx = self.agent_to_env[agent_idx]
-        if env_idx >= len(seeds):
-            return None
-
-        return seeds[env_idx]
-
-    def _get_action_trace(self, agent_idx):
-        history = self.action_history[agent_idx]
-        if not history:
-            return np.empty(0, dtype=np.uint8)
-
-        return np.fromiter(history, dtype=np.uint8, count=len(history))
-
-    def _record_action_history(self, agent_ids, actions):
-        for local_idx, agent_idx in enumerate(agent_ids):
-            if local_idx >= len(actions):
-                break
-            self.action_history[agent_idx].append(int(actions[local_idx]))
-
-    def _clear_action_history(self, agent_ids):
-        for agent_idx in agent_ids:
-            self.action_history[agent_idx].clear()
-
+    
     def explore(self):
         profile = self.profile
         epoch = self.epoch
@@ -354,9 +327,11 @@ class PuffeRL:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
             agent_ids = np.asarray(env_id)
+            #currently only suporting Serial so this should be all envs but this will
+            #change in the future
 
             profile('eval_misc', epoch)
-            env_id = slice(agent_ids[0], agent_ids[-1] + 1)
+            env_id = slice(env_id[0], env_id[-1] + 1)
 
             done_mask = np.logical_or(d, t)
             self.global_step += int(mask.sum())
@@ -373,35 +348,26 @@ class PuffeRL:
                 z = self.cell_encoder(o_device)
                 h = self.hash_encoder(z)
 
-            E = len(agent_ids)
-            action = torch.randint(0, atn_space.n, (E,), device=device)
+            #encoder_update/optimse
+
+            #self.CellStore.insert_batch(keys_u64, seeds_u64, action_traces_u8)
+            keys - h.to(torch.int64).cpu().numpy() #keys to be inserted
+            seeds = self.vecenv.episode_seeds[env_ids]
+            #action_traces_u8 = ...
+            self.cell_store.insert_batch(keys, seeds, action_traces_u8)
+
+
+            action = torch.randint(0, atn_space.n, (env_ids.shape[0],), device=device)
             #CONT ACTIONS?
             r = torch.clamp(r, -1, 1)
 
             profile('eval_copy', epoch)
 
-            hashes = h.detach().cpu().numpy()
-            keys, seeds, action_traces = [], [], []
-            for local_idx, agent_idx in enumerate(agent_ids):
-                seed_val = self._seed_for_agent(agent_idx)
-                if seed_val is None:
-                    continue
 
-                keys.append(int(hashes[local_idx]))
-                seeds.append(int(seed_val))
-                action_traces.append(self._get_action_trace(agent_idx))
-
-            if keys:
-                self.cell_store.insert_batch(keys, seeds, action_traces)
-
-            done_positions = np.flatnonzero(done_mask)
-            if done_positions.size:
-                self._clear_action_history(agent_ids[done_positions])
 
 
 
             action = action.cpu().numpy()
-            self._record_action_history(agent_ids, action)
 
             profile('eval_misc', epoch)
             for i in info:
