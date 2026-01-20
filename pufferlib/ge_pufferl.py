@@ -66,7 +66,7 @@ class CellStore:
         self.chosen = []
         self.cumulative_rewards = []
 
-    def insert_batch(self, keys_u64, seeds_u64, action_traces_u8):
+    def insert_batch(self, keys_u64, seeds_u64, action_traces_u8, cum_rewards_f32, lengths_u16):
         """
         keys_u64:   shape [B], dtype uint64 (torch or numpy or python ints)
         seeds_u64:  shape [B], dtype uint64
@@ -78,35 +78,41 @@ class CellStore:
         out_idx = [None] * B
 
         for i in range(B):
+
             k = int(keys_u64[i])
             idx = self.index.get(k)
-            if idx is not None:
-                self.visits[idx] += 1
+
+            if idx is None: #Cell hash not in store
+                if self.capacity is not None and len(self.keys) >= self.capacity:
+                    out_idx[i] = None
+                    continue
+                idx = len(self.keys)
+                self.index[k] = idx
+                self.keys.append(k)
+                self.seeds.append(int(seeds_u64[i]))
+                self.lengths.append(int(lengths_u16[i]))
+                self.actions.append(np.array(action_traces_u8[i], dtype=np.uint8, copy=True))
+                self.cumulative_rewards.append(float(cum_rewards_f32[i]))
+                self.visits.append(1)
                 out_idx[i] = idx
                 continue
+        
+            #Cell hash already in store
 
-            if self.capacity is not None and len(self.keys) >= self.capacity:
-                # simplest policy for demo: stop inserting new cells
-                out_idx[i] = None
-                continue
-
-            idx = len(self.keys)
-            self.index[k] = idx
-            self.keys.append(k)
-            self.seeds.append(int(seeds_u64[i]))
-
-            L = len(action_traces_u8[i])
-
-            self.lengths.append(L)
-
-            # store a copy (avoid aliasing)
-            self.actions.append(np.array(action_traces_u8[i], dtype=np.uint8, copy=True))
-
-            self.visits.append(1)
+            self.visits[idx] += 1
+            new_score = float(cum_rewards_f32[i])
+            old_score = self.cumulative_rewards[idx]
+            new_len = int(lengths_u16[i])
+            if (new_score > old_score) or (new_score == old_score and new_len < self.lengths[idx]):
+                self.seeds[idx] = int(seeds_u64[i])
+                self.lengths[idx] = new_len
+                self.actions[idx] = np.array(action_traces_u8[i], dtype=np.uint8, copy=True)
+                self.cumulative_rewards[idx] = new_score
             out_idx[i] = idx
 
         return out_idx
 
+        
     def sample_indices(self, n: int):
         """Uniform random sample of stored cells. Returns list[int]."""
         m = len(self.keys)
@@ -181,17 +187,7 @@ class PuffeRL:
         self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
         self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
         self.free_idx = total_agents
-        self.action_trace_length = config.get('action_trace_length', horizon)
-        self.action_history = [
-            deque(maxlen=self.action_trace_length) for _ in range(self.total_agents)
-        ]
-        if hasattr(vecenv, 'agents_per_env'):
-            agent_to_env = []
-            for env_idx, count in enumerate(vecenv.agents_per_env):
-                agent_to_env.extend([env_idx] * count)
-            self.agent_to_env = np.array(agent_to_env, dtype=np.int32)
-        else:
-            self.agent_to_env = np.arange(self.total_agents, dtype=np.int32)
+        
 
         # Minibatching & gradient accumulation
         minibatch_size = config['minibatch_size']
@@ -299,6 +295,12 @@ class PuffeRL:
         self.cell_store_capacity = config['cell_store_capacity']
         self.cell_store = CellStore(self.cell_store_capacity)
 
+        # preallocate
+        self.max_steps = int(config.get("max_steps", 500))
+        self.action_buf = np.zeros((self.total_agents, self.max_steps), dtype=np.uint16)
+        self.action_len = np.zeros(self.total_agents, dtype=np.uint16)
+        self.cum_reward = np.zeros(self.total_agents, dtype=np.float32)
+
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -334,6 +336,9 @@ class PuffeRL:
             env_id = slice(env_id[0], env_id[-1] + 1)
 
             done_mask = np.logical_or(d, t)
+            if done_mask.any():
+                self.action_len[agent_ids[done_mask]] = 0
+                self.cum_reward[agent_ids[done_mask]] = 0
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
@@ -341,6 +346,8 @@ class PuffeRL:
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            r = torch.clamp(r, -1, 1)
+            self.cum_reward[agent_ids] += r.cpu().numpy()
 
             profile('eval_forward', epoch)
             
@@ -350,24 +357,40 @@ class PuffeRL:
 
             #encoder_update/optimse
 
-            #self.CellStore.insert_batch(keys_u64, seeds_u64, action_traces_u8)
-            keys - h.to(torch.int64).cpu().numpy() #keys to be inserted
-            seeds = self.vecenv.episode_seeds[env_ids]
-            #action_traces_u8 = ...
-            self.cell_store.insert_batch(keys, seeds, action_traces_u8)
+            keys = h.to(torch.uint64).cpu().numpy() #keys to be inserted
+            seeds = self.vecenv.episode_seeds[agent_ids]  #seeds are handled in Serial in vector.py
+
+            # build action_traces_u8 BEFORE appending new action
+            action_traces_u8 = [
+                                self.action_buf[a, :self.action_len[a]].astype(np.uint8, copy=True)
+                                for a in agent_ids
+                                ]
+
+           
+            #Insert before next action goes to action traces so trace lead to current obs
+            lengths = self.action_len[agent_ids]
+            cum_rewards = self.cum_reward[agent_ids]
+            self.cell_store.insert_batch(keys, seeds, action_traces_u8, cum_rewards, lengths)
+            self.states["unique_cells"] = len(self.cell_store.keys)
 
 
-            action = torch.randint(0, atn_space.n, (env_ids.shape[0],), device=device)
+
+            action = torch.randint(0, atn_space.n, (len(agent_ids),), device=device)
             #CONT ACTIONS?
-            r = torch.clamp(r, -1, 1)
 
             profile('eval_copy', epoch)
 
-
-
-
-
             action = action.cpu().numpy()
+
+            #action to action trace buffer
+
+            idx = self.action_len[agent_ids]
+            valid = idx < self.max_steps
+            ai = agent_ids[valid]
+            ii = idx[valid]
+            self.action_buf[ai, ii] = action[valid]
+            self.action_len[ai] = ii + 1
+
 
             profile('eval_misc', epoch)
             for i in info:
@@ -1380,10 +1403,29 @@ def process_config(config, parser=None):
 
     args['train']['env'] = args['env_name'] or ''  # for trainer dashboard
     args['train']['use_rnn'] = args['rnn_name'] is not None
+
+
     return args
 
+def explore(env_name, args=None, vecenv=None, policy=None):
+      args = args or load_config(env_name)
+      vecenv = vecenv or load_env(env_name, args)
+      policy = policy or load_policy(args, vecenv, env_name)
+
+      explore_config = {**args['train'], 'env': env_name}
+      pufferl = PuffeRL(explore_config, vecenv, policy)
+
+      while pufferl.global_step < explore_config['total_timesteps']:
+          if explore_config['device'] == 'cuda':
+              torch.compiler.cudagraph_mark_step_begin()
+          pufferl.explore()
+          pufferl.print_dashboard()
+
+      pufferl.close()
+
+
 def main():
-    err = 'Usage: puffer [train, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info'
+    err = 'Usage: puffer [train, eval, sweep, autotune, profile, export, explore] [env_name] [optional args]. --help for more info'
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -1401,6 +1443,8 @@ def main():
         profile(env_name=env_name)
     elif mode == 'export':
         export(env_name=env_name)
+    elif mode == 'explore':
+        explore(env_name=env_name)
     else:
         raise pufferlib.APIUsageError(err)
 

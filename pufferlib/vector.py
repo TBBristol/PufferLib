@@ -97,7 +97,7 @@ class Serial:
         self.flag = RESET
 
         #FOR DETERMINISTIC SEEDS
-        self.epiode_seeds = np.full(self.num_envs, -1, dtype=np.int64) #acess curret seed
+        self.epiode_seeds = np.full(self.num_agents, -1, dtype=np.int64) #acess curret seed
         self.seed_counter = 0 #seed counter to incerment for a new seed
         
 
@@ -122,16 +122,19 @@ class Serial:
     def async_reset(self, seed=None):
         self.flag = RECV
         infos = []
+
+        ptr = 0
         for i, env in enumerate(self.envs):
+            end = ptr + self.agents_per_env[i]
             if seed is None:
-                ob, i = env.reset()
                 env_seed = self.seed_counter
                 self.seed_counter += 1
-                self.episode_seeds[i] = env_seed
+                ob, i = env.reset(seed=env_seed)
             else:
                 env_seed = seed+i
-                ob, i = env.reset(env_seed)
-                self.episode_seeds[i] = env_seed
+                ob, i = env.reset(seed=env_seed)
+            self.episode_seeds[ptr:end] = env_seed
+            ptr = end
                
             if isinstance(i, list):
                 infos.extend(i)
@@ -152,11 +155,11 @@ class Serial:
             end = ptr + self.agents_per_env[idx]
             atns = actions[ptr:end]
             if env.done:
-                 choose a deterministic seed for the new episode
+                #choose a deterministic seed for the new episode
                 env_seed = self.seed_counter
                 self.seed_counter += 1
                 o, i = env.reset(seed=env_seed)
-                self.episode_seeds[idx] = env_seed
+                self.episode_seeds[ptr:end] = env_seed
             else:
                 o, r, d, t, i = env.step(atns)
 
