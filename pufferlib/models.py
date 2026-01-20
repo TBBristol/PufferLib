@@ -31,6 +31,23 @@ class CellEncoder(nn.Module):
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
             )
+
+        if self.is_multidiscrete:
+            self.action_nvec = tuple(env.single_action_space.nvec)
+            num_atns = sum(self.action_nvec)
+            self.decoder = pufferlib.pytorch.layer_init(
+                    nn.Linear(hidden_size*2, num_atns), std=0.01)
+        elif not self.is_continuous:
+            num_atns = env.single_action_space.n
+            self.decoder = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size*2, num_atns), std=0.01)
+        else:
+            self.decoder_mean = pufferlib.pytorch.layer_init(
+                nn.Linear(hidden_size*2, env.single_action_space.shape[0]), std=0.01)
+            self.decoder_logstd = nn.Parameter(torch.zeros(
+                1, env.single_action_space.shape[0]))
+
+
             
     def forward_eval(self, observations, state=None):
         hidden = self.encode_observations(observations, state=state)
@@ -49,6 +66,16 @@ class CellEncoder(nn.Module):
         else: 
             observations = observations.view(batch_size, -1)
         return self.encoder(observations.float())
+
+    def inverse_head(self, encoded_s, encoded_s1):
+        encoded_states = torch.cat([encoded_s, encoded_s1], dim=1)
+        if self.is_continuous:
+            return self.decoder_mean(encoded_states)
+        else:
+            return self.decoder(encoded_states)
+        
+
+
 
 class SimHash64(nn.Module):
       def __init__(self, in_dim, seed=0):

@@ -288,6 +288,8 @@ class PuffeRL:
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
+        ################  GE stuff
+
         from pufferlib.models import CellEncoder, SimHash64
 
         self.cell_encoder = CellEncoder(self.vecenv.driver_env).to(config['device'])
@@ -301,6 +303,21 @@ class PuffeRL:
         self.action_len = np.zeros(self.total_agents, dtype=np.uint16)
         self.cum_reward = np.zeros(self.total_agents, dtype=np.float32)
 
+        self.encoder_buffer_size = config['encoder_buffer_size']
+        obs_shape = self.vecenv.single_observation_space.shape
+
+        self.encoder_buffer_obs = np.zeros((self.encoder_buffer_size, *obs_shape), 
+                                           dtype=self.vecenv.single_observation_space.dtype)
+        self.encoder_buffer_next_obs = np.zeros_like(self.encoder_buffer_obs)
+        self.encoder_buffer_act = np.zeros((self.encoder_buffer_size, *atn_space.shape),
+            dtype=atn_space.dtype)
+        
+        self.enc_head = 0
+        self.enc_size = 0
+        self.prev_obs = np.zeros((self.total_agents, *obs_shape), dtype=self.vecenv.single_observation_space.dtype)
+        self.prev_act = np.zeros((self.total_agents, *atn_space.shape), dtype=atn_space.dtype)
+        self.prev_valid = np.zeros(self.total_agents, dtype=bool)
+
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -309,7 +326,6 @@ class PuffeRL:
     def sps(self):
         if self.global_step == self.last_log_step:
             return 0
-
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
     
@@ -339,6 +355,7 @@ class PuffeRL:
             if done_mask.any():
                 self.action_len[agent_ids[done_mask]] = 0
                 self.cum_reward[agent_ids[done_mask]] = 0
+                self.prev_valid[agent_ids[done_mask]] = False
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
@@ -347,7 +364,34 @@ class PuffeRL:
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
             r = torch.clamp(r, -1, 1)
+
             self.cum_reward[agent_ids] += r.cpu().numpy()
+
+
+            # encoder buffer
+
+            valid = self.prev_valid[agent_ids]
+            o_np = o.cpu().numpy()
+            if valid.any():
+                src = agent_ids[valid]
+                n = len(src)
+                h = self.enc_head
+                end = min(self.encoder_buffer_size - h, n)
+
+                self.encoder_buffer_obs[h:h+end] = self.prev_obs[src[:end]]
+                self.encoder_buffer_act[h:h+end] = self.prev_act[src[:end]]
+                self.encoder_buffer_next_obs[h:h+end] = o_np[:end]
+
+                if end < n:
+                    rem = n - end
+                    self.encoder_buffer_obs[0:rem] = self.prev_obs[src[end:]]
+                    self.encoder_buffer_act[0:rem] = self.prev_act[src[end:]]
+                    self.encoder_buffer_next_obs[0:rem] = o_np[end:end+rem]
+
+                self.enc_head = (h + n) % self.encoder_buffer_size
+                self.enc_size = min(self.enc_size + n, self.encoder_buffer_size)
+
+
 
             profile('eval_forward', epoch)
             
@@ -381,6 +425,11 @@ class PuffeRL:
             profile('eval_copy', epoch)
 
             action = action.cpu().numpy()
+            
+
+            self.prev_obs[agent_ids] = o_np
+            self.prev_act[agent_ids] = action
+            self.prev_valid[agent_ids] = True
 
             #action to action trace buffer
 
