@@ -290,6 +290,13 @@ class PuffeRL:
 
         ################  GE stuff
 
+        """
+        we want to store cells per agent since ppo trains per agent which getss actions there may
+        be multiple agents per env. but for a cell we need to store all agents in an envs action traces to make
+        it deterinistic"""
+
+
+
         from pufferlib.models import CellEncoder, SimHash64
 
         self.cell_encoder = CellEncoder(self.vecenv.driver_env).to(config['device'])
@@ -299,9 +306,17 @@ class PuffeRL:
 
         # preallocate
         self.max_steps = int(config.get("max_steps", 500))
-        self.action_buf = np.zeros((self.total_agents, self.max_steps), dtype=np.uint16)
-        self.action_len = np.zeros(self.total_agents, dtype=np.uint16)
+        self.env_trace_buf = np.zeros((self.vecenv.num_envs, self.max_steps, max(self.vecenv.agents_per_env)), dtype=np.uint16)
+        self.env_trace_len = np.zeros(self.vecenv.num_envs, dtype=np.uint16)
         self.cum_reward = np.zeros(self.total_agents, dtype=np.float32)
+
+        if hasattr(vecenv, 'agents_per_env'):
+            agent_to_env = []
+            for env_idx, count in enumerate(vecenv.agents_per_env):
+                agent_to_env.extend([env_idx] * count)
+            self.agent_to_env = np.array(agent_to_env, dtype=np.int32)
+        else:
+            self.agent_to_env = np.arange(self.total_agents, dtype=np.int32)
 
         self.encoder_buffer_size = config['encoder_buffer_size']
         obs_shape = self.vecenv.single_observation_space.shape
@@ -358,11 +373,9 @@ class PuffeRL:
             #change in the future
 
             profile('eval_misc', epoch)
-            env_id = slice(env_id[0], env_id[-1] + 1)
 
             done_mask = np.logical_or(d, t)
             if done_mask.any():
-                self.action_len[agent_ids[done_mask]] = 0
                 self.cum_reward[agent_ids[done_mask]] = 0
                 self.prev_valid[agent_ids[done_mask]] = False
             self.global_step += int(mask.sum())
@@ -416,19 +429,27 @@ class PuffeRL:
             seeds = self.vecenv.episode_seeds[agent_ids]  #seeds are handled in Serial in vector.py
 
             # build action_traces_u8 BEFORE appending new action
-            action_traces_u8 = [
-                                self.action_buf[a, :self.action_len[a]].astype(np.uint8, copy=True)
-                                for a in agent_ids
-                                ]
 
-           
+            ptr = 0
+            for env_idx, n in enumerate(self.vecenv.agents_per_env):
+                if done_mask[ptr:ptr+n].any():
+                    self.env_trace_len[env_idx] = 0
+                ptr += n
+
+            env_ids = self.agent_to_env[agent_ids]
+            env_traces = {}
+            for e in np.unique(env_ids):
+                n = self.vecenv.agents_per_env[e]
+                env_traces[e] = self.env_trace_buf[e, :self.env_trace_len[e], :n].copy()
+
+            action_traces_u8 = [env_traces[e] for e in env_ids]
+            lengths = np.array([self.env_trace_len[e] for e in env_ids], dtype=np.uint16)
+
             #Insert before next action goes to action traces so trace lead to current obs
-            lengths = self.action_len[agent_ids]
             cum_rewards = self.cum_reward[agent_ids]
             self.cell_store.insert_batch(keys, seeds, action_traces_u8, cum_rewards, lengths)
             self.stats["unique_cells"] = len(self.cell_store.keys)
-
-
+            self.stats["largest_cum_reward"] = max(self.cell_store.cumulative_rewards)
 
             action = torch.randint(0, atn_space.n, (len(agent_ids),), device=device)
             #CONT ACTIONS?
@@ -443,14 +464,13 @@ class PuffeRL:
             self.prev_valid[agent_ids] = True
 
             #action to action trace buffer
-
-            idx = self.action_len[agent_ids]
-            valid = idx < self.max_steps
-            ai = agent_ids[valid]
-            ii = idx[valid]
-            self.action_buf[ai, ii] = action[valid]
-            self.action_len[ai] = ii + 1
-
+            ptr = 0
+            for env_idx, n in enumerate(self.vecenv.agents_per_env):
+                t = self.env_trace_len[env_idx]
+                if t < self.max_steps:
+                    self.env_trace_buf[env_idx, t, :n] = action[ptr:ptr+n]
+                    self.env_trace_len[env_idx] = t + 1
+                ptr += n
 
             profile('eval_misc', epoch)
             for i in info:

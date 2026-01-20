@@ -130,6 +130,9 @@ class Serial:
                 env_seed = self.seed_counter
                 self.seed_counter += 1
                 ob, i = env.reset(seed=env_seed)
+            elif isinstance(seed, (list, tuple, np.ndarray)):
+                env_seed = seed[i]
+                ob, i = env.reset(seed=env_seed)
             else:
                 env_seed = seed+i
                 ob, i = env.reset(seed=env_seed)
