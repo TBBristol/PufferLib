@@ -290,8 +290,8 @@ class PuffeRL:
 
         from pufferlib.models import CellEncoder, SimHash64
 
-        self.cell_encoder = CellEncoder(self.vecenv.driver_env)
-        self.hash_encoder = SimHash64(self.cell_encoder.hidden_size, seed=config['hash_seed'])
+        self.cell_encoder = CellEncoder(self.vecenv.driver_env).to(config['device'])
+        self.hash_encoder = SimHash64(self.cell_encoder.hidden_size, seed=config['hash_seed']).to(config['device'])
         self.cell_store_capacity = config['cell_store_capacity']
         self.cell_store = CellStore(self.cell_store_capacity)
 
@@ -371,7 +371,7 @@ class PuffeRL:
             lengths = self.action_len[agent_ids]
             cum_rewards = self.cum_reward[agent_ids]
             self.cell_store.insert_batch(keys, seeds, action_traces_u8, cum_rewards, lengths)
-            self.states["unique_cells"] = len(self.cell_store.keys)
+            self.stats["unique_cells"] = len(self.cell_store.keys)
 
 
 
@@ -402,8 +402,9 @@ class PuffeRL:
                     else:
                         self.stats[k].append(v)
 
-            profile('env', epoch)
+            profile('env', epoch)   
             self.vecenv.send(action)
+            self.print_dashboard()
 
         profile('eval_misc', epoch)
         self.free_idx = self.total_agents

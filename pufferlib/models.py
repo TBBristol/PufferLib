@@ -61,9 +61,9 @@ class SimHash64(nn.Module):
       def forward(self, x):
           # x: [B, in_dim] float
           signs = (x @ self.proj) > 0  # [B, 64] bool
-          bits = signs.to(torch.uint64)
-          shifts = torch.arange(64, device=x.device, dtype=torch.uint64)
-          return (bits << shifts).sum(dim=1)
+          bits = signs.to(torch.int64)
+          shifts = torch.arange(64, device=x.device, dtype=torch.int64)
+          return (bits << shifts).sum(dim=1).to(torch.uint64)
 
 
 class Default(nn.Module):

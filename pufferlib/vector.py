@@ -97,7 +97,7 @@ class Serial:
         self.flag = RESET
 
         #FOR DETERMINISTIC SEEDS
-        self.epiode_seeds = np.full(self.num_agents, -1, dtype=np.int64) #acess curret seed
+        self.episode_seeds = np.full(self.num_agents, -1, dtype=np.int64) #acess curret seed
         self.seed_counter = 0 #seed counter to incerment for a new seed
         
 
