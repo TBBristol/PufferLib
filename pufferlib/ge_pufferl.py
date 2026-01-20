@@ -318,6 +318,15 @@ class PuffeRL:
         self.prev_act = np.zeros((self.total_agents, *atn_space.shape), dtype=atn_space.dtype)
         self.prev_valid = np.zeros(self.total_agents, dtype=bool)
 
+        self.inv_batch_size = config.get("inv_batch_size", 256)
+        self.inv_train_every = config.get("inv_train_every", 32)  # steps
+        self.inv_steps = 0
+
+        # optimizer for encoder + inverse head
+        self.inv_optimizer = torch.optim.Adam(
+                                self.cell_encoder.parameters(), lr=config.get("inv_lr", 3e-4)
+                                )
+
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -374,22 +383,24 @@ class PuffeRL:
             o_np = o.cpu().numpy()
             if valid.any():
                 src = agent_ids[valid]
+                obs_next = o_np[valid]
                 n = len(src)
                 h = self.enc_head
                 end = min(self.encoder_buffer_size - h, n)
 
                 self.encoder_buffer_obs[h:h+end] = self.prev_obs[src[:end]]
                 self.encoder_buffer_act[h:h+end] = self.prev_act[src[:end]]
-                self.encoder_buffer_next_obs[h:h+end] = o_np[:end]
+                self.encoder_buffer_next_obs[h:h+end] = obs_next[:end]
 
                 if end < n:
                     rem = n - end
                     self.encoder_buffer_obs[0:rem] = self.prev_obs[src[end:]]
                     self.encoder_buffer_act[0:rem] = self.prev_act[src[end:]]
-                    self.encoder_buffer_next_obs[0:rem] = o_np[end:end+rem]
+                    self.encoder_buffer_next_obs[0:rem] = obs_next[end:end+rem]
 
                 self.enc_head = (h + n) % self.encoder_buffer_size
                 self.enc_size = min(self.enc_size + n, self.encoder_buffer_size)
+                self.stats['encoder_buffer_size'] = self.enc_size
 
 
 
@@ -455,12 +466,56 @@ class PuffeRL:
             self.vecenv.send(action)
             self.print_dashboard()
 
+            self.inv_steps += 1
+            self.stats['inv_steps'] = self.inv_steps
+            if self.inv_steps % self.inv_train_every == 0:
+                self.cell_encoder.train()
+                inv_loss = self.train_inverse()
+                self.cell_encoder.eval()
+                print(f'inv_loss: {inv_loss}')
+                self.stats['inv_loss']= inv_loss.item()
+
         profile('eval_misc', epoch)
         self.free_idx = self.total_agents
         self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
         self.ep_lengths.zero_()
         profile.end()
         return self.stats
+
+    def train_inverse(self):
+        if self.enc_size < self.inv_batch_size:
+            return
+
+        idx = np.random.randint(0, self.enc_size, size=self.inv_batch_size)
+        obs = torch.as_tensor(self.encoder_buffer_obs[idx], device=self.config['device'])
+        next_obs = torch.as_tensor(self.encoder_buffer_next_obs[idx], device=self.config['device'])
+        act = torch.as_tensor(self.encoder_buffer_act[idx], device=self.config['device'])
+
+        z = self.cell_encoder(obs)
+        z1 = self.cell_encoder(next_obs)
+        pred = self.cell_encoder.inverse_head(z, z1)
+
+        if self.cell_encoder.is_continuous:
+            loss = torch.nn.functional.mse_loss(pred, act.float())
+        elif self.cell_encoder.is_multidiscrete:
+            # split logits per branch
+            losses = []
+            offset = 0
+            for n in self.cell_encoder.action_nvec:
+                losses.append(torch.nn.functional.cross_entropy(
+                    pred[:, offset:offset+n], act[:, len(losses)]
+                ))
+                offset += n
+            loss = sum(losses)
+        else:
+            loss = torch.nn.functional.cross_entropy(pred, act.long())
+
+        self.inv_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.inv_optimizer.step()
+        return loss
+
+
 
     @record
     def train(self):
