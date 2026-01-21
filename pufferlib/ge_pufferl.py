@@ -113,12 +113,42 @@ class CellStore:
         return out_idx
 
         
-    def sample_indices(self, n: int):
+    def sample_random_indices(self, n: int):
         """Uniform random sample of stored cells. Returns list[int]."""
         m = len(self.keys)
         if m == 0:
             return []
         return [random.randrange(m) for _ in range(n)]
+
+    def sample_indices(self, n: int):
+        m = len(self.keys)
+        if m == 0:
+            return []
+        # normalize return to [0,1]
+        r = np.array(self.cumulative_rewards, dtype=np.float32)
+        r_min, r_max = r.min(), r.max()
+        if r_max > r_min:
+            r_norm = (r - r_min) / (r_max - r_min)
+        else:
+            r_norm = np.zeros_like(r)
+
+        visits = np.array(self.visits, dtype=np.float32)
+        lengths = np.array(self.lengths, dtype=np.float32)
+
+        w_novelty = 0.5
+        w_return = 0.5
+        w_short = 0.1
+        alpha = 1.0
+
+        scores = (
+            w_novelty / (1.0 + visits)
+            + w_return * r_norm
+            + w_short * (1.0 / (1.0 + lengths))
+        )
+        probs = scores ** alpha
+        probs /= probs.sum()
+
+        return np.random.choice(m, size=n, replace=True, p=probs).tolist()
 
     def get(self, idx: int):
         """Return metadata needed to replay to cell."""
@@ -152,6 +182,8 @@ class PuffeRL:
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
         self.total_agents = total_agents
+        print(self.total_agents)
+        print(vecenv.num_envs)
 
         # Experience
         if config['batch_size'] == 'auto' and config['bptt_horizon'] == 'auto':
@@ -304,10 +336,19 @@ class PuffeRL:
         self.cell_store_capacity = config['cell_store_capacity']
         self.cell_store = CellStore(self.cell_store_capacity)
 
+
+        self.treat_agents_as_envs = bool(config.get("treat_agents_as_envs", False))
+        if self.treat_agents_as_envs:
+            self.ge_agents_per_env = [1] * self.total_agents
+            self.ge_agent_to_env = np.arange(self.total_agents, dtype=np.int32)
+        else:
+            self.ge_agents_per_env = self.vecenv.agents_per_env
+            self.ge_agent_to_env = self.agent_to_env
+
         # preallocate
         self.max_steps = int(config.get("max_steps", 500))
-        self.env_trace_buf = np.zeros((self.vecenv.num_envs, self.max_steps, max(self.vecenv.agents_per_env)), dtype=np.uint16)
-        self.env_trace_len = np.zeros(self.vecenv.num_envs, dtype=np.uint16)
+        self.env_trace_buf = np.zeros((len(self.ge_agents_per_env), self.max_steps, max(self.ge_agents_per_env)), dtype=np.uint16)
+        self.env_trace_len = np.zeros(len(self.ge_agents_per_env), dtype=np.uint16)
         self.cum_reward = np.zeros(self.total_agents, dtype=np.float32)
 
         if hasattr(vecenv, 'agents_per_env'):
@@ -341,6 +382,22 @@ class PuffeRL:
         self.inv_optimizer = torch.optim.Adam(
                                 self.cell_encoder.parameters(), lr=config.get("inv_lr", 3e-4)
                                 )
+
+        #return mode settings
+        self.return_threshold = config.get("return_threshold", 1000)
+        self.return_k = config.get("return_k", 100)
+        self.return_mode = False
+
+        # Per-env return state
+        self.return_cell_idx = np.full(self.vecenv.num_envs, -1, dtype=np.int32)
+        self.return_seed = np.zeros(self.vecenv.num_envs, dtype=np.int64)
+        self.return_trace = [None] * self.vecenv.num_envs  # list of [T, agents] arrays
+        self.return_trace_len = np.zeros(self.vecenv.num_envs, dtype=np.int32)
+        self.return_replay_step = np.zeros(self.vecenv.num_envs, dtype=np.int32)
+        self.return_steps_left = np.zeros(self.vecenv.num_envs, dtype=np.int32)
+
+        self.completed_rtns = 0
+        self.dones_in_replay = 0
 
     @property
     def uptime(self):
@@ -431,15 +488,15 @@ class PuffeRL:
             # build action_traces_u8 BEFORE appending new action
 
             ptr = 0
-            for env_idx, n in enumerate(self.vecenv.agents_per_env):
+            for env_idx, n in enumerate(self.ge_agents_per_env):
                 if done_mask[ptr:ptr+n].any():
                     self.env_trace_len[env_idx] = 0
                 ptr += n
 
-            env_ids = self.agent_to_env[agent_ids]
+            env_ids = self.ge_agent_to_env[agent_ids]
             env_traces = {}
             for e in np.unique(env_ids):
-                n = self.vecenv.agents_per_env[e]
+                n = self.ge_agents_per_env[e]
                 env_traces[e] = self.env_trace_buf[e, :self.env_trace_len[e], :n].copy()
 
             action_traces_u8 = [env_traces[e] for e in env_ids]
@@ -451,13 +508,103 @@ class PuffeRL:
             self.stats["unique_cells"] = len(self.cell_store.keys)
             self.stats["largest_cum_reward"] = max(self.cell_store.cumulative_rewards)
 
-            action = torch.randint(0, atn_space.n, (len(agent_ids),), device=device)
-            #CONT ACTIONS?
+            # Return trigger: ALL envs return together once threshold is hit
+            if (not self.return_mode) and (len(self.cell_store.keys) >= self.return_threshold):
+                num_envs = len(self.ge_agents_per_env)
+
+
+                #temp change to test shorter paths
+                """
+                max_return_length = int(config.get("max_return_length", 5))
+
+                idxs = []
+                for _ in range(num_envs):
+                    picked = None
+                    for _ in range(16):  # try a few times to find a short trace
+                        idx = self.cell_store.sample_indices(1)[0]
+                        if self.cell_store.lengths[idx] <= max_return_length:
+                            picked = idx
+                            break
+                    if picked is None:
+                        picked = idx  # fallback to last pick
+                    idxs.append(picked)"""
+
+
+
+                idxs = self.cell_store.sample_indices(num_envs)
+                self.return_mode = True
+                # return cycle bookkeeping
+                self.stats["return_cycles"] = self.stats.get("return_cycles", 0) + 1
+                self.stats["env_count"] = len(self.ge_agents_per_env)
+                self.stats["agents_per_env_mean"] = float(np.mean(self.ge_agents_per_env))
+
+
+                self.return_cell_idx[:num_envs] = idxs
+
+                for e, idx in enumerate(idxs):
+                    cell = self.cell_store.get(idx)
+                    self.return_seed[e] = cell["seed"]
+                    self.return_trace[e] = cell["actions"]
+                    self.return_trace_len[e] = cell["length"]
+
+                self.return_replay_step[:num_envs] = 0
+                self.return_steps_left[:num_envs] = self.return_k
+
+                # Clear per-env trace + per-agent episode state
+                self.env_trace_len[:num_envs] = 0
+                self.cum_reward[:] = 0
+                self.prev_valid[:] = False
+
+                # Reseed all envs and restart loop without sending an action
+                self.vecenv.async_reset(self.return_seed[:num_envs].tolist())
+                continue
+
+
+            if self.return_mode:
+                # Build actions per env: replay stored trace, then random for k steps
+                action = np.empty(len(agent_ids), dtype=np.int64)
+                ptr = 0
+                for env_idx, n in enumerate(self.ge_agents_per_env):
+                    end = ptr + n
+                    step = self.return_replay_step[env_idx]
+                    if step < self.return_trace_len[env_idx]:
+                        # Replay all agents for this env at this step
+                        action[ptr:end] = self.return_trace[env_idx][step, :n]
+                        self.return_replay_step[env_idx] += 1
+                        if done_mask[ptr:end].any():
+                            self.dones_in_replay += int(done_mask[ptr:end].sum())
+                            self.stats['dones_in_replay'] = self.dones_in_replay
+
+                    else:
+                        # Log return success once per env, right after replay finishes
+                        if self.return_steps_left[env_idx] == self.return_k:
+                            stored_key = self.cell_store.keys[self.return_cell_idx[env_idx]]
+                            env_keys = keys[ptr:end]  # keys for agents in this env
+                            hit = 1 if np.any(env_keys == stored_key) else 0
+                            self.completed_rtns += hit
+                            self.stats['completed_returns'] = self.completed_rtns
+                            self.stats["return_attempts"] = self.stats.get("return_attempts", 0) + 1
+                            self.stats["return_hit_rate"] = (
+                            self.stats["completed_returns"] / self.stats["return_attempts"]
+                              )
+
+                            
+
+
+                        # After replay, explore randomly for k steps
+                        action[ptr:end] = np.random.randint(0, atn_space.n, size=n)
+                        if self.return_steps_left[env_idx] > 0:
+                            self.return_steps_left[env_idx] -= 1
+                    ptr = end
+
+                # Exit return mode once all envs finished their random steps
+                if np.all(self.return_steps_left[:len(self.ge_agents_per_env)] <= 0):
+                    self.return_mode = False
+            else:
+                action = torch.randint(0, atn_space.n, (len(agent_ids),), device=device)
+                action = action.cpu().numpy()
 
             profile('eval_copy', epoch)
-
-            action = action.cpu().numpy()
-            
 
             self.prev_obs[agent_ids] = o_np
             self.prev_act[agent_ids] = action
@@ -465,7 +612,7 @@ class PuffeRL:
 
             #action to action trace buffer
             ptr = 0
-            for env_idx, n in enumerate(self.vecenv.agents_per_env):
+            for env_idx, n in enumerate(self.ge_agents_per_env):
                 t = self.env_trace_len[env_idx]
                 if t < self.max_steps:
                     self.env_trace_buf[env_idx, t, :n] = action[ptr:ptr+n]
