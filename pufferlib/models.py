@@ -8,6 +8,47 @@ import pufferlib.emulation
 import pufferlib.pytorch
 import pufferlib.spaces
 
+class GoalPolicy(nn.Module):
+    def __init__(self, env, hidden_size=128, goal_size=128):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.goal_size = goal_size
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+
+        head_in = hidden_size + goal_size
+        if self.is_multidiscrete:
+            self.action_nvec = tuple(env.single_action_space.nvec)
+            num_atns = sum(self.action_nvec)
+            self.decoder = pufferlib.pytorch.layer_init(nn.Linear(head_in, num_atns), std=0.01)
+        elif not self.is_continuous:
+            num_atns = env.single_action_space.n
+            self.decoder = pufferlib.pytorch.layer_init(nn.Linear(head_in, num_atns), std=0.01)
+        else:
+            self.decoder_mean = pufferlib.pytorch.layer_init(
+                nn.Linear(head_in, env.single_action_space.shape[0]), std=0.01)
+            self.decoder_logstd = nn.Parameter(torch.zeros(1, env.single_action_space.shape[0]))
+
+    def forward_eval(self, obs_latent, goal_latent):
+        x = torch.cat([obs_latent, goal_latent], dim=1)
+        if self.is_continuous:
+            mean = self.decoder_mean(x)
+            logstd = self.decoder_logstd.expand_as(mean)
+            std = torch.exp(logstd)
+            return torch.distributions.Normal(mean, std)
+        else:
+            logits = self.decoder(x)
+            if self.is_multidiscrete:
+                return logits.split(self.action_nvec, dim=1)
+            return logits
+
+    def forward(self, obs_latent, goal_latent):
+        return self.forward_eval(obs_latent, goal_latent)
+
+
+
 class CellEncoder(nn.Module):
     def __init__(self, env, hidden_size=128):
         super().__init__()

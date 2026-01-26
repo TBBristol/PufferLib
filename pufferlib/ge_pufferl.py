@@ -65,8 +65,9 @@ class CellStore:
         self.actions = []
         self.chosen = []
         self.cumulative_rewards = []
+        self.goals = []
 
-    def insert_batch(self, keys_u64, seeds_u64, action_traces_u8, cum_rewards_f32, lengths_u16):
+    def insert_batch(self, keys_u64, seeds_u64, action_traces_u8, cum_rewards_f32, lengths_u16, goals_f32):
         """
         keys_u64:   shape [B], dtype uint64 (torch or numpy or python ints)
         seeds_u64:  shape [B], dtype uint64
@@ -95,6 +96,7 @@ class CellStore:
                 self.cumulative_rewards.append(float(cum_rewards_f32[i]))
                 self.visits.append(1)
                 out_idx[i] = idx
+                self.goals.append(np.array(goals_f32[i], dtype=np.float32, copy=True))
                 continue
         
             #Cell hash already in store
@@ -108,6 +110,7 @@ class CellStore:
                 self.lengths[idx] = new_len
                 self.actions[idx] = np.array(action_traces_u8[i], dtype=np.uint8, copy=True)
                 self.cumulative_rewards[idx] = new_score
+                self.goals[idx] = np.array(goals_f32[i], dtype=np.float32, copy=True)
             out_idx[i] = idx
 
         return out_idx
@@ -399,6 +402,26 @@ class PuffeRL:
         self.completed_rtns = 0
         self.dones_in_replay = 0
 
+        # Goal-conditioned return: store target latent per GE env
+        self.return_goal = np.zeros(
+              (len(self.ge_agents_per_env), self.cell_encoder.hidden_size),
+              dtype=np.float32
+              )
+
+        from pufferlib.models import GoalPolicy
+        # Goal-conditioned return policy
+        self.goal_policy = GoalPolicy(self.vecenv.driver_env, hidden_size=config.get("goal_hidden", 128)).to(config['device'])
+        self.goal_optimizer = torch.optim.Adam(self.goal_policy.parameters(), lr=config.get("goal_lr", 3e-4))
+
+        self.goal_buffer_size = int(config.get("goal_buffer_size", 100_000))
+        self.goal_buffer_obs = np.zeros((self.goal_buffer_size, self.cell_encoder.hidden_size), dtype=np.float32)
+        self.goal_buffer_goal = np.zeros((self.goal_buffer_size, self.cell_encoder.hidden_size), dtype=np.float32)
+        self.goal_buffer_act = np.zeros((self.goal_buffer_size, *atn_space.shape), dtype=atn_space.dtype)
+        self.goal_buf_head = 0
+        self.goal_buf_size = 0
+        self.goal_train_every = int(config.get("goal_train_every", 128))
+        self.goal_batch_size = int(config.get("goal_batch_size", 256))
+
     @property
     def uptime(self):
         return time.time() - self.start_time
@@ -438,6 +461,7 @@ class PuffeRL:
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
+            o_np = o
             o = torch.as_tensor(o)
             o_device = o.to(device)#, non_blocking=True)
             r = torch.as_tensor(r).to(device)#, non_blocking=True)
@@ -449,28 +473,29 @@ class PuffeRL:
 
             # encoder buffer
 
-            valid = self.prev_valid[agent_ids]
-            o_np = o.cpu().numpy()
-            if valid.any():
-                src = agent_ids[valid]
-                obs_next = o_np[valid]
-                n = len(src)
-                h = self.enc_head
-                end = min(self.encoder_buffer_size - h, n)
+            if not self.return_mode:
 
-                self.encoder_buffer_obs[h:h+end] = self.prev_obs[src[:end]]
-                self.encoder_buffer_act[h:h+end] = self.prev_act[src[:end]]
-                self.encoder_buffer_next_obs[h:h+end] = obs_next[:end]
+                valid = self.prev_valid[agent_ids]
+                if valid.any():
+                    src = agent_ids[valid]
+                    obs_next = o_np[valid]
+                    n = len(src)
+                    h = self.enc_head
+                    end = min(self.encoder_buffer_size - h, n)
 
-                if end < n:
-                    rem = n - end
-                    self.encoder_buffer_obs[0:rem] = self.prev_obs[src[end:]]
-                    self.encoder_buffer_act[0:rem] = self.prev_act[src[end:]]
-                    self.encoder_buffer_next_obs[0:rem] = obs_next[end:end+rem]
+                    self.encoder_buffer_obs[h:h+end] = self.prev_obs[src[:end]]
+                    self.encoder_buffer_act[h:h+end] = self.prev_act[src[:end]]
+                    self.encoder_buffer_next_obs[h:h+end] = obs_next[:end]
 
-                self.enc_head = (h + n) % self.encoder_buffer_size
-                self.enc_size = min(self.enc_size + n, self.encoder_buffer_size)
-                self.stats['encoder_buffer_size'] = self.enc_size
+                    if end < n:
+                        rem = n - end
+                        self.encoder_buffer_obs[0:rem] = self.prev_obs[src[end:]]
+                        self.encoder_buffer_act[0:rem] = self.prev_act[src[end:]]
+                        self.encoder_buffer_next_obs[0:rem] = obs_next[end:end+rem]
+
+                    self.enc_head = (h + n) % self.encoder_buffer_size
+                    self.enc_size = min(self.enc_size + n, self.encoder_buffer_size)
+                    self.stats['encoder_buffer_size'] = self.enc_size
 
 
 
@@ -478,6 +503,8 @@ class PuffeRL:
             
             with torch.no_grad():
                 z = self.cell_encoder(o_device)
+                z_np = z.detach().cpu().numpy()
+                goals = z_np 
                 h = self.hash_encoder(z)
 
             #encoder_update/optimse
@@ -497,14 +524,14 @@ class PuffeRL:
             env_traces = {}
             for e in np.unique(env_ids):
                 n = self.ge_agents_per_env[e]
-                env_traces[e] = self.env_trace_buf[e, :self.env_trace_len[e], :n].copy()
+                env_traces[e] = self.env_trace_buf[e, :self.env_trace_len[e], :n]
 
             action_traces_u8 = [env_traces[e] for e in env_ids]
             lengths = np.array([self.env_trace_len[e] for e in env_ids], dtype=np.uint16)
 
             #Insert before next action goes to action traces so trace lead to current obs
             cum_rewards = self.cum_reward[agent_ids]
-            self.cell_store.insert_batch(keys, seeds, action_traces_u8, cum_rewards, lengths)
+            self.cell_store.insert_batch(keys, seeds, action_traces_u8, cum_rewards, lengths, goals)
             self.stats["unique_cells"] = len(self.cell_store.keys)
             self.stats["largest_cum_reward"] = max(self.cell_store.cumulative_rewards)
 
@@ -546,6 +573,7 @@ class PuffeRL:
                     self.return_seed[e] = cell["seed"]
                     self.return_trace[e] = cell["actions"]
                     self.return_trace_len[e] = cell["length"]
+                    self.return_goal[e] = self.cell_store.goals[idx]
 
                 self.return_replay_step[:num_envs] = 0
                 self.return_steps_left[:num_envs] = self.return_k
@@ -559,50 +587,100 @@ class PuffeRL:
                 self.vecenv.async_reset(self.return_seed[:num_envs].tolist())
                 continue
 
-
             if self.return_mode:
-                # Build actions per env: replay stored trace, then random for k steps
                 action = np.empty(len(agent_ids), dtype=np.int64)
+
+                # Build per-agent goal batch
+                goal_batch = np.zeros((len(agent_ids), self.return_goal.shape[1]), dtype=np.float32)
+                ptr = 0
+                for env_idx, n in enumerate(self.ge_agents_per_env):
+                    goal_batch[ptr:ptr+n] = self.return_goal[env_idx]
+                    ptr += n
+
+                use_goal = self.goal_buf_size >= self.goal_batch_size * 10
+
+                # Single forward pass for all agents
+                with torch.no_grad():
+                    goal_t = torch.as_tensor(goal_batch, device=device)
+                    logits = self.goal_policy.forward_eval(z, goal_t)
+
+                if self.goal_policy.is_multidiscrete:
+                    acts = []
+                    for logit in logits:
+                        acts.append(torch.argmax(logit, dim=1).cpu().numpy())
+                    action[:] = np.stack(acts, axis=1)
+                elif self.goal_policy.is_continuous:
+                    action[:] = logits.mean.cpu().numpy()
+                else:
+                    action[:] = torch.argmax(logits, dim=1).cpu().numpy()
+
+                # Per-env replay counters + BC buffer (vectorized)
                 ptr = 0
                 for env_idx, n in enumerate(self.ge_agents_per_env):
                     end = ptr + n
                     step = self.return_replay_step[env_idx]
-                    if step < self.return_trace_len[env_idx]:
-                        # Replay all agents for this env at this step
-                        action[ptr:end] = self.return_trace[env_idx][step, :n]
-                        self.return_replay_step[env_idx] += 1
-                        if done_mask[ptr:end].any():
-                            self.dones_in_replay += int(done_mask[ptr:end].sum())
-                            self.stats['dones_in_replay'] = self.dones_in_replay
 
+                    if step < self.return_trace_len[env_idx]:
+                        trace_act = self.return_trace[env_idx][step, :n]
+                        
+                        if not use_goal:
+                            action[ptr:end] = trace_act #replay until buffer is ready 
+
+                        
+                            goal_vec = self.return_goal[env_idx]
+
+                            h = int(self.goal_buf_head)
+                            n_i = int(n)
+                            buf_size = int(self.goal_buffer_size)
+
+                            end_h = h + n_i
+                            if end_h <= buf_size:
+                                self.goal_buffer_obs[h:end_h] = z_np[ptr:end]
+                                self.goal_buffer_act[h:end_h] = trace_act
+                                self.goal_buffer_goal[h:end_h] = goal_vec
+                            else:
+                                first = self.goal_buffer_size - h
+                                self.goal_buffer_obs[h:] = z_np[ptr:ptr+first]
+                                self.goal_buffer_act[h:] = trace_act[:first]
+                                self.goal_buffer_goal[h:] = goal_vec
+                                rem = n - first
+                                self.goal_buffer_obs[:rem] = z_np[ptr+first:end]
+                                self.goal_buffer_act[:rem] = trace_act[first:]
+                                self.goal_buffer_goal[:rem] = goal_vec
+
+                            self.goal_buf_head = (h + n_i) % self.goal_buffer_size
+                            self.goal_buf_size = min(self.goal_buf_size + n_i, self.goal_buffer_size)
+
+                        self.return_replay_step[env_idx] += 1
                     else:
-                        # Log return success once per env, right after replay finishes
                         if self.return_steps_left[env_idx] == self.return_k:
                             stored_key = self.cell_store.keys[self.return_cell_idx[env_idx]]
-                            env_keys = keys[ptr:end]  # keys for agents in this env
+                            env_keys = keys[ptr:end]
                             hit = 1 if np.any(env_keys == stored_key) else 0
                             self.completed_rtns += hit
                             self.stats['completed_returns'] = self.completed_rtns
                             self.stats["return_attempts"] = self.stats.get("return_attempts", 0) + 1
                             self.stats["return_hit_rate"] = (
-                            self.stats["completed_returns"] / self.stats["return_attempts"]
-                              )
+                                self.stats["completed_returns"] / self.stats["return_attempts"]
+                            )
 
-                            
-
-
-                        # After replay, explore randomly for k steps
                         action[ptr:end] = np.random.randint(0, atn_space.n, size=n)
                         if self.return_steps_left[env_idx] > 0:
                             self.return_steps_left[env_idx] -= 1
+
                     ptr = end
 
-                # Exit return mode once all envs finished their random steps
                 if np.all(self.return_steps_left[:len(self.ge_agents_per_env)] <= 0):
                     self.return_mode = False
             else:
                 action = torch.randint(0, atn_space.n, (len(agent_ids),), device=device)
                 action = action.cpu().numpy()
+
+
+   
+
+
+
 
             profile('eval_copy', epoch)
 
@@ -642,12 +720,48 @@ class PuffeRL:
                 print(f'inv_loss: {inv_loss}')
                 self.stats['inv_loss']= inv_loss.item()
 
+            if (self.goal_buf_size >= self.goal_batch_size
+                  and self.inv_steps % self.goal_train_every == 0):
+                goal_loss = self.train_goal_policy()
+                if goal_loss is not None:
+                    self.stats["goal_bc_loss"] = goal_loss.item()
+
         profile('eval_misc', epoch)
         self.free_idx = self.total_agents
         self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
         self.ep_lengths.zero_()
         profile.end()
         return self.stats
+
+    def train_goal_policy(self):
+        if self.goal_buf_size < self.goal_batch_size:
+            return
+
+        idx = np.random.randint(0, self.goal_buf_size, size=self.goal_batch_size)
+        obs = torch.as_tensor(self.goal_buffer_obs[idx], device=self.config['device'])
+        goal = torch.as_tensor(self.goal_buffer_goal[idx], device=self.config['device'])
+        act = torch.as_tensor(self.goal_buffer_act[idx], device=self.config['device'])
+
+        self.goal_policy.train()
+        pred = self.goal_policy.forward_eval(obs, goal)
+
+        if self.goal_policy.is_continuous:
+            loss = torch.nn.functional.mse_loss(pred.mean, act.float())
+        elif self.goal_policy.is_multidiscrete:
+            losses = []
+            for i, logits in enumerate(pred):
+                losses.append(torch.nn.functional.cross_entropy(
+                    logits, act[:, i].long()
+                ))
+            loss = sum(losses)
+        else:
+            loss = torch.nn.functional.cross_entropy(pred, act.long())
+
+        self.goal_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.goal_optimizer.step()
+        self.goal_policy.eval()
+        return loss
 
     def train_inverse(self):
         if self.enc_size < self.inv_batch_size:
