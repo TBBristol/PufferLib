@@ -31,6 +31,8 @@ import pufferlib
 import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
+from pufferlib.replay_buffer import ReplayBuffer
+import pufferlib.models
 try:
     from pufferlib import _C
 except ImportError:
@@ -74,6 +76,32 @@ class PuffeRL:
         total_agents = vecenv.num_agents
         self.total_agents = total_agents
 
+        # Replay buffer for GO-Explore
+        sample_obs = np.zeros(obs_space.shape, dtype=obs_space.dtype)
+        sample_action = np.zeros(atn_space.shape, dtype=atn_space.dtype)
+        sample_goal = np.zeros(obs_space.shape, dtype=obs_space.dtype)
+        self.replay = ReplayBuffer(
+            capacity=config['replay_capacity'],
+            sample_obs=sample_obs,
+            sample_action=sample_action,
+            sample_goal=sample_goal,
+            latent_dim=config['latent_dim'],
+        )
+
+        # GO-Explore tracking buffers
+        self.episode_ids = np.arange(total_agents, dtype=np.int32)
+        self.timesteps = np.zeros(total_agents, dtype=np.int32)
+        self.next_episode_id = total_agents
+        self.prev_obs = np.zeros((total_agents, *obs_space.shape), dtype=obs_space.dtype)
+        self.prev_action = np.zeros((total_agents, *atn_space.shape), dtype=atn_space.dtype)
+        self.prev_goal = np.zeros((total_agents, *obs_space.shape), dtype=obs_space.dtype)
+        self.current_goals = np.zeros((total_agents, *obs_space.shape), dtype=obs_space.dtype)
+        self.has_prev = False
+        self.goal_traj_indices = [None] * total_agents
+        self.goal_traj_pos = np.zeros(total_agents, dtype=np.int32)
+        self.rng = np.random.default_rng(config['seed'])
+        self.ge_steps = 0
+
         # Experience
         if config['batch_size'] == 'auto' and config['bptt_horizon'] == 'auto':
             raise pufferlib.APIUsageError('Must specify batch_size or bptt_horizon')
@@ -96,6 +124,7 @@ class PuffeRL:
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
+        self.goal_observations = torch.zeros_like(self.observations)
         self.actions = torch.zeros(segments, horizon, *atn_space.shape, device=device,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
         self.values = torch.zeros(segments, horizon, device=device)
@@ -177,6 +206,28 @@ class PuffeRL:
 
         self.optimizer = optimizer
 
+        # Latent encoder and optimizer
+        latent_input_size = int(np.prod(obs_space.shape))
+        self.latent_encoder = pufferlib.models.LatentEncoder(
+            vecenv.driver_env, hidden_size=config['latent_dim'], input_size=latent_input_size
+        ).to(device)
+        if config['optimizer'] == 'muon':
+            from heavyball import ForeachMuon
+            self.latent_optimizer = ForeachMuon(
+                self.latent_encoder.parameters(),
+                lr=config['latent_learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+                heavyball_momentum=True,
+            )
+        else:
+            self.latent_optimizer = torch.optim.Adam(
+                self.latent_encoder.parameters(),
+                lr=config['latent_learning_rate'],
+                betas=(config['adam_beta1'], config['adam_beta2']),
+                eps=config['adam_eps'],
+            )
+
         # Logging
         self.logger = logger
         if logger is None:
@@ -210,6 +261,9 @@ class PuffeRL:
         self.stats = defaultdict(list)
         self.last_stats = defaultdict(list)
         self.losses = {}
+        self.latent_loss = None
+        self.goal_success = None
+        self.goal_dist = None
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -225,6 +279,391 @@ class PuffeRL:
             return 0
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
+
+    def evaluate_ge(self):
+        profile = self.profile
+        epoch = self.epoch
+        profile('eval', epoch)
+        profile('eval_misc', epoch, nest=True)
+
+        config = self.config
+        device = config['device']
+
+        if config['use_rnn']:
+            for k in self.lstm_h:
+                self.lstm_h[k].zero_()
+                self.lstm_c[k].zero_()
+
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile('env', epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            self.ge_steps += 1
+
+            profile('eval_misc', epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+
+            done_mask = d + t # TODO: Handle truncations separately
+            self.global_step += int(mask.sum())
+
+            profile('eval_copy', epoch)
+            o = torch.as_tensor(o)
+            o_device = o.to(device)#, non_blocking=True)
+            r = torch.as_tensor(r).to(device)#, non_blocking=True)
+            d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            t = torch.as_tensor(t).to(device)#, non_blocking=True)
+
+            profile('eval_forward', epoch)
+            if self.ge_steps % config['latent_train_freq'] == 0:
+                profile('latent_train', epoch)
+                latent_loss = self.train_latent()
+                if latent_loss is not None:
+                    self.latent_loss = latent_loss.item()
+
+            if self.ge_steps % config['latent_update_freq'] == 0:
+                profile('latent_recompute', epoch)
+                self.replay.recompute_latents(self.latent_encoder, device)
+                self.replay.recompute_sorted_density(device)
+
+            with torch.no_grad(), self.amp_context:
+                profile('eval_main', epoch)
+                if self.has_prev:
+                    o_device = o.to(device)
+                    next_latent = self.latent_encoder(o_device.float()).detach().cpu().numpy()
+                    goal_latent = self.latent_encoder(
+                        torch.as_tensor(self.prev_goal[env_id], device=device).float()
+                    ).detach().cpu().numpy()
+                    self.replay.add_batch(
+                        self.prev_obs[env_id],
+                        o.cpu().numpy(),
+                        self.prev_action[env_id],
+                        r.cpu().numpy(),
+                        d.cpu().numpy(),
+                        t.cpu().numpy(),
+                        self.prev_goal[env_id],
+                        self.episode_ids[env_id],
+                        self.timesteps[env_id],
+                        latents=next_latent,
+                        goal_latents=goal_latent,
+                    )
+
+                    done_envs = (d | t).cpu().numpy()
+                    if done_envs.any():
+                        new_ids = np.arange(self.next_episode_id,
+                            self.next_episode_id + int(done_envs.sum()), dtype=np.int32)
+                        self.episode_ids[env_id][done_envs] = new_ids
+                        self.timesteps[env_id][done_envs] = 0
+                        self.next_episode_id += int(done_envs.sum())
+
+                    self.timesteps[env_id][~done_envs] += 1
+
+                # Density-based goal selection per env
+                if len(self.replay.sorted_density) == 0:
+                    self.current_goals[env_id] = o
+                else:
+                    for i, env_idx in enumerate(range(env_id.start, env_id.stop)):
+                        traj = self.goal_traj_indices[env_idx]
+                        pos = self.goal_traj_pos[env_idx]
+                        if traj is None or pos >= len(traj):
+                            traj = self.replay.sample_pruned_trajectory(
+                                config['geometric_p'],
+                                config['goal_threshold'],
+                                self.rng,
+                                config['lighten_dist_coef'],
+                            )
+                            self.goal_traj_indices[env_idx] = traj
+                            self.goal_traj_pos[env_idx] = 0
+                            pos = 0
+                        self.current_goals[env_idx] = self.replay.next_observations[traj[pos]]
+
+                # Advance subgoal when reached (latent distance)
+                goal_latent = self.latent_encoder(
+                    torch.as_tensor(self.current_goals[env_id], device=device).float()
+                )
+                obs_latent = self.latent_encoder(o_device.float())
+                dist = torch.norm(obs_latent - goal_latent, dim=1)
+                reached = dist < config['goal_threshold']
+                if reached.any():
+                    reached_idx = np.nonzero(reached.detach().cpu().numpy())[0]
+                    for i in reached_idx:
+                        env_idx = env_id.start + i
+                        self.goal_traj_pos[env_idx] += 1
+
+                # Goal stats (persist and publish during train_ge logging)
+                self.goal_success = reached.float().mean().item()
+                self.goal_dist = dist.mean().item()
+
+                # Goal-reaching shaping reward: 0 if reached, -1 otherwise
+                r = torch.where(reached, torch.zeros_like(r), -torch.ones_like(r))
+
+                state = dict(
+                    reward=r,
+                    done=d,
+                    env_id=env_id,
+                    mask=mask,
+                    goal=torch.as_tensor(self.current_goals[env_id], device=device),
+                )
+
+                if config['use_rnn']:
+                    state['lstm_h'] = self.lstm_h[env_id.start]
+                    state['lstm_c'] = self.lstm_c[env_id.start]
+
+                logits, value = self.policy.forward_eval(o_device, state)
+                action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                r = torch.clamp(r, -1, 1)
+
+            profile('eval_copy', epoch)
+            with torch.no_grad():
+                if config['use_rnn']:
+                    self.lstm_h[env_id.start] = state['lstm_h']
+                    self.lstm_c[env_id.start] = state['lstm_c']
+
+                # Fast path for fully vectorized envs
+                l = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
+
+                if config['cpu_offload']:
+                    self.observations[batch_rows, l] = o
+                else:
+                    self.observations[batch_rows, l] = o_device
+                self.goal_observations[batch_rows, l] = torch.as_tensor(
+                    self.current_goals[env_id], device=self.observations.device)
+
+                self.actions[batch_rows, l] = action
+                self.logprobs[batch_rows, l] = logprob
+                self.rewards[batch_rows, l] = r
+                self.terminals[batch_rows, l] = d.float()
+                self.values[batch_rows, l] = value.flatten()
+
+                # Note: We are not yet handling masks in this version
+                self.ep_lengths[env_id] += 1
+                if l+1 >= config['bptt_horizon']:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config['device']).int()
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action = action.cpu().numpy()
+                if isinstance(logits, torch.distributions.Normal):
+                    action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
+
+                self.prev_obs[env_id] = o
+                self.prev_action[env_id] = action
+                self.prev_goal[env_id] = self.current_goals[env_id]
+                self.has_prev = True
+
+            profile('eval_misc', epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+
+            # Only attach goal stats when env stats are present
+            if self.stats and self.goal_success is not None and self.goal_dist is not None:
+                self.stats['goal_success'] = self.goal_success
+                self.stats['goal_dist'] = self.goal_dist
+
+            profile('env', epoch)
+            self.vecenv.send(action)
+
+          
+
+        profile('eval_misc', epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        profile.end()
+        return self.stats
+
+    def train_latent(self):
+        if not self.replay.full and self.replay.transitions_stored < self.config['inv_batch_size']:
+            return None
+
+        idx = self.replay.sample(self.config['inv_batch_size'], self.rng)
+        obs = torch.as_tensor(self.replay.observations[idx], device=self.config['device'])
+        next_obs = torch.as_tensor(self.replay.next_observations[idx], device=self.config['device'])
+        act = torch.as_tensor(self.replay.actions[idx], device=self.config['device'])
+
+        z = self.latent_encoder(obs)
+        z1 = self.latent_encoder(next_obs)
+        pred = self.latent_encoder.inverse_head(z, z1)
+
+        if self.latent_encoder.is_continuous:
+            loss = torch.nn.functional.mse_loss(pred, act.float())
+        elif self.latent_encoder.is_multidiscrete:
+            losses = []
+            offset = 0
+            for n in self.latent_encoder.action_nvec:
+                losses.append(torch.nn.functional.cross_entropy(
+                    pred[:, offset:offset+n], act[:, len(losses)]
+                ))
+                offset += n
+            loss = sum(losses)
+        else:
+            loss = torch.nn.functional.cross_entropy(pred, act.long())
+
+        self.latent_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.latent_optimizer.step()
+        return loss
+
+    @record
+    def train_ge(self):
+        profile = self.profile
+        epoch = self.epoch
+        profile('train', epoch)
+        profile('train_misc', epoch, nest=True)
+        losses = defaultdict(float)
+        config = self.config
+        device = config['device']
+
+        b0 = config['prio_beta0']
+        a = config['prio_alpha']
+        clip_coef = config['clip_coef']
+        vf_clip = config['vf_clip_coef']
+        anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
+        self.ratio[:] = 1
+
+        for mb in range(self.total_minibatches):
+            profile('train_misc', epoch)
+            self.amp_context.__enter__()
+
+            shape = self.values.shape
+            advantages = torch.zeros(shape, device=device)
+            advantages = compute_puff_advantage(self.values, self.rewards,
+                self.terminals, self.ratio, advantages, config['gamma'],
+                config['gae_lambda'], config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
+            # Prioritize experience by advantage magnitude
+            adv = advantages.abs().sum(axis=1)
+            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+            prio_probs = (prio_weights + 1e-6)/(prio_weights.sum() + 1e-6)
+            idx = torch.multinomial(prio_probs, self.minibatch_segments)
+            mb_prio = (self.segments*prio_probs[idx, None])**-anneal_beta
+
+            profile('train_copy', epoch)
+            mb_obs = self.observations[idx]
+            mb_goal = self.goal_observations[idx]
+            mb_actions = self.actions[idx]
+            mb_logprobs = self.logprobs[idx]
+            mb_rewards = self.rewards[idx]
+            mb_terminals = self.terminals[idx]
+            mb_truncations = self.truncations[idx]
+            mb_ratio = self.ratio[idx]
+            mb_values = self.values[idx]
+            mb_returns = advantages[idx] + mb_values
+            mb_advantages = advantages[idx]
+
+            profile('train_forward', epoch)
+            if not config['use_rnn']:
+                mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+                mb_goal = mb_goal.reshape(-1, *self.vecenv.single_observation_space.shape)
+
+            state = dict(
+                action=mb_actions,
+                lstm_h=None,
+                lstm_c=None,
+                goal=mb_goal,
+            )
+
+            logits, newvalue = self.policy(mb_obs, state)
+            actions, newlogprob, entropy = pufferlib.pytorch.sample_logits(logits, action=mb_actions)
+
+            profile('train_misc', epoch)
+            newlogprob = newlogprob.reshape(mb_logprobs.shape)
+            logratio = newlogprob - mb_logprobs
+            ratio = logratio.exp()
+            self.ratio[idx] = ratio.detach()
+
+            with torch.no_grad():
+                old_approx_kl = (-logratio).mean()
+                approx_kl = ((ratio - 1) - logratio).mean()
+                clipfrac = ((ratio - 1.0).abs() > config['clip_coef']).float().mean()
+
+            # NOTE: Commenting this out since adv is replaced below
+            # adv = advantages[idx]
+            # adv = compute_puff_advantage(mb_values, mb_rewards, mb_terminals,
+            #     ratio, adv, config['gamma'], config['gae_lambda'],
+            #     config['vtrace_rho_clip'], config['vtrace_c_clip'])
+
+            # Weight advantages by priority and normalize
+            adv = mb_advantages
+            adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+
+            # Losses
+            pg_loss1 = -adv * ratio
+            pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+            newvalue = newvalue.view(mb_returns.shape)
+            v_clipped = mb_values + torch.clamp(newvalue - mb_values, -vf_clip, vf_clip)
+            v_loss_unclipped = (newvalue - mb_returns) ** 2
+            v_loss_clipped = (v_clipped - mb_returns) ** 2
+            v_loss = 0.5*torch.max(v_loss_unclipped, v_loss_clipped).mean()
+
+            entropy_loss = entropy.mean()
+
+            loss = pg_loss + config['vf_coef']*v_loss - config['ent_coef']*entropy_loss
+            self.amp_context.__enter__() # TODO: AMP needs some debugging
+
+            # This breaks vloss clipping?
+            self.values[idx] = newvalue.detach().float()
+
+            # Logging
+            profile('train_misc', epoch)
+            losses['policy_loss'] += pg_loss.item() / self.total_minibatches
+            losses['value_loss'] += v_loss.item() / self.total_minibatches
+            losses['entropy'] += entropy_loss.item() / self.total_minibatches
+            losses['old_approx_kl'] += old_approx_kl.item() / self.total_minibatches
+            losses['approx_kl'] += approx_kl.item() / self.total_minibatches
+            losses['clipfrac'] += clipfrac.item() / self.total_minibatches
+            losses['importance'] += ratio.mean().item() / self.total_minibatches
+
+            losses['latent_loss'] += self.latent_loss
+
+            # Learn on accumulated minibatches
+            profile('learn', epoch)
+            loss.backward()
+            if (mb + 1) % self.accumulate_minibatches == 0:
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config['max_grad_norm'])
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+        # Reprioritize experience
+        profile('train_misc', epoch)
+        if config['anneal_lr']:
+            self.scheduler.step()
+
+        y_pred = self.values.flatten()
+        y_true = advantages.flatten() + self.values.flatten()
+        var_y = y_true.var()
+        explained_var = torch.nan if var_y == 0 else (1 - (y_true - y_pred).var() / var_y).item()
+        losses['explained_variance'] = explained_var
+
+        profile.end()
+        logs = None
+        self.epoch += 1
+        done_training = self.global_step >= config['total_timesteps']
+        if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
+            logs = self.mean_and_log()
+            self.losses = losses
+            self.print_dashboard()
+            self.stats = defaultdict(list)
+            self.last_log_time = time.time()
+            self.last_log_step = self.global_step
+            profile.clear()
+
+        if self.epoch % config['checkpoint_interval'] == 0 or done_training:
+            self.save_checkpoint()
+            self.msg = f'Checkpoint saved at update {self.epoch}'
+
+        return logs
+
 
     def evaluate(self):
         profile = self.profile
@@ -991,6 +1430,85 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
     pufferl.logger.close(model_path, early_stop=False)
     return all_logs
 
+def train_ge(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop_fn=None):
+    args = args or load_config(env_name)
+
+    # Assume TorchRun DDP is used if LOCAL_RANK is set
+    if 'LOCAL_RANK' in os.environ:
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        master_addr = os.environ.get('MASTER_ADDR', 'localhost')
+        master_port = os.environ.get('MASTER_PORT', '29500')
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+
+    vecenv = vecenv or load_env(env_name, args)
+    policy = policy or load_policy(args, vecenv, env_name)
+
+    if 'LOCAL_RANK' in os.environ:
+        args['train']['device'] = torch.cuda.current_device()
+        torch.distributed.init_process_group(backend='nccl', world_size=world_size)
+        policy = policy.to(local_rank)
+        model = torch.nn.parallel.DistributedDataParallel(
+            policy, device_ids=[local_rank], output_device=local_rank
+        )
+        if hasattr(policy, 'lstm'):
+            model.hidden_size = policy.hidden_size
+        model.forward_eval = policy.forward_eval
+        policy = model.to(local_rank)
+
+    if args['neptune']:
+        logger = NeptuneLogger(args)
+    elif args['wandb']:
+        logger = WandbLogger(args)
+
+    train_config = { **args['train'], 'env': env_name }
+    pufferl = PuffeRL(train_config, vecenv, policy, logger)
+
+    # Sweep needs data for early stopped runs, so send data when steps > 100M
+    logging_threshold = min(0.20*train_config['total_timesteps'], 100_000_000)
+    all_logs = []
+
+    while pufferl.global_step < train_config['total_timesteps']:
+        if train_config['device'] == 'cuda':
+            torch.compiler.cudagraph_mark_step_begin()
+        pufferl.evaluate_ge()
+        if train_config['device'] == 'cuda':
+           torch.compiler.cudagraph_mark_step_begin()
+        logs = pufferl.train_ge()
+
+        if logs is not None:
+            should_stop_early = False
+            if early_stop_fn is not None:
+                should_stop_early = early_stop_fn(logs)
+                if 'early_stop_threshold' in logs:
+                    pufferl.logger.log({'environment/early_stop_threshold': logs['early_stop_threshold']}, logs['agent_steps'])
+
+            if pufferl.global_step > logging_threshold:
+                all_logs.append(logs)
+
+            if should_stop_early:
+                model_path = pufferl.close()
+                pufferl.logger.close(model_path, early_stop=True)
+                return all_logs
+
+    # Final eval. You can reset the env here, but depending on
+    # your env, this can skew data (i.e. you only collect the shortest
+    # rollouts within a fixed number of epochs)
+    for i in range(128):
+        stats = pufferl.evaluate_ge()
+        if i >= 32 and stats:
+            break
+
+    logs = pufferl.mean_and_log()
+    if logs is not None:
+        all_logs.append(logs)
+
+    pufferl.print_dashboard()
+    model_path = pufferl.close()
+    pufferl.logger.close(model_path, early_stop=False)
+    return all_logs
+
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
     backend = args['vec']['backend']
@@ -1322,7 +1840,7 @@ def process_config(config, parser=None):
     return args
 
 def main():
-    err = 'Usage: puffer [train, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info'
+    err = 'Usage: puffer [train, train_ge, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info'
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -1330,6 +1848,8 @@ def main():
     env_name = sys.argv.pop(1)
     if mode == 'train':
         train(env_name=env_name)
+    elif mode == 'train_ge':
+        train_ge(env_name=env_name)
     elif mode == 'eval':
         eval(env_name=env_name)
     elif mode == 'sweep':

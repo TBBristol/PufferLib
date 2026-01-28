@@ -36,9 +36,11 @@ class Default(nn.Module):
         if self.is_dict_obs:
             self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
             input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            input_size *= 2
             self.encoder = nn.Linear(input_size, self.hidden_size)
         else:
             num_obs = np.prod(env.single_observation_space.shape)
+            num_obs *= 2
             self.encoder = torch.nn.Sequential(
                 pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
                 nn.GELU(),
@@ -77,8 +79,18 @@ class Default(nn.Module):
         if self.is_dict_obs:
             observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
             observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
-        else: 
+        else:
             observations = observations.view(batch_size, -1)
+
+        if state is not None and 'goal' in state:
+            goal = state['goal']
+            if self.is_dict_obs:
+                goal = pufferlib.pytorch.nativize_tensor(goal, self.dtype)
+                goal = torch.cat([v.view(batch_size, -1) for v in goal.values()], dim=1)
+            else:
+                goal = goal.view(batch_size, -1)
+            observations = torch.cat([observations, goal], dim=1)
+
         return self.encoder(observations.float())
 
     def decode_actions(self, hidden):
@@ -198,6 +210,89 @@ class LSTMWrapper(nn.Module):
         state['lstm_h'] = lstm_h.detach()
         state['lstm_c'] = lstm_c.detach()
         return logits, values
+
+class LatentEncoder(nn.Module):
+    def __init__(self, env, hidden_size=128, input_size=None):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict) 
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict) 
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            inferred = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+            input_size = inferred if input_size is None else input_size
+            self.encoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(input_size, hidden_size)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+                nn.GELU(),
+            )
+        else:
+            num_obs = np.prod(env.single_observation_space.shape)
+            if input_size is not None:
+                num_obs = input_size
+            self.encoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(num_obs, hidden_size)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+                nn.GELU(),
+            )
+
+        if self.is_multidiscrete:
+            self.action_nvec = tuple(env.single_action_space.nvec)
+            num_atns = sum(self.action_nvec)
+            self.decoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, hidden_size*2)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, num_atns), std=0.01),
+            )
+        elif not self.is_continuous:
+            num_atns = env.single_action_space.n
+            self.decoder = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, hidden_size*2)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, num_atns), std=0.01),
+            )
+        else:
+            self.decoder_mean = torch.nn.Sequential(
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, hidden_size*2)),
+                nn.GELU(),
+                pufferlib.pytorch.layer_init(nn.Linear(hidden_size*2, env.single_action_space.shape[0]), std=0.01),
+            )
+            self.decoder_logstd = nn.Parameter(torch.zeros(
+                1, env.single_action_space.shape[0]))
+
+    def forward_eval(self, observations, state=None):
+        hidden = self.encode_observations(observations, state=state)
+        return hidden
+
+    def forward(self, observations, state=None):
+        return self.forward_eval(observations, state)
+
+    def encode_observations(self, observations, state=None):
+        '''Encodes a batch of observations into hidden states. Assumes
+        no time dimension (handled by LSTM wrappers).'''
+        batch_size = observations.shape[0]
+        if self.is_dict_obs:
+            observations = pufferlib.pytorch.nativize_tensor(observations, self.dtype)
+            observations = torch.cat([v.view(batch_size, -1) for v in observations.values()], dim=1)
+        else: 
+            observations = observations.view(batch_size, -1)
+        return self.encoder(observations.float())
+
+    def inverse_head(self, encoded_s, encoded_s1):
+        encoded_states = torch.cat([encoded_s, encoded_s1], dim=1)
+        if self.is_continuous:
+            return self.decoder_mean(encoded_states)
+        else:
+            return self.decoder(encoded_states)
 
 class Convolutional(nn.Module):
     def __init__(self, env, *args, framestack, flat_size,
