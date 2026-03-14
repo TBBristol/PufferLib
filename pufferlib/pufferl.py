@@ -596,7 +596,7 @@ def train(env_name, args=None, logger=None, verbose=True, early_stop_fn=None):
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
-    backend = args['vec']['backend']
+    backend = args.get('vec', {}).get('backend', 'Serial')
     if backend != 'PufferEnv':
         backend = 'Serial'
 

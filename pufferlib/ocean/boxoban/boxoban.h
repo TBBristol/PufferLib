@@ -441,6 +441,7 @@ typedef struct {
     float episode_length; // Recommended metric: number of steps of agent episode
     // Any extra fields you add here may be exported to Python in binding.c
     float on_targets; // Number of targets currently boxed
+    float difficulty; // 0=basic,1=easy,2=medium,3=hard,4=unfiltered
     float n; // Required as the last field 
 } Log;
 
@@ -458,14 +459,15 @@ typedef struct {
 typedef struct {
     Log log; // Required field. Env binding code uses this to aggregate logs
     unsigned char* observations; // Required. You can use any obs type, but make sure it matches in Python!
-    int* actions; // Required. int* for discrete/multidiscrete, float* for box
+    double* actions; // Required. int* for discrete/multidiscrete, float* for box
     float* rewards; // Required
-    unsigned char* terminals; // Required. We don't yet have truncations as standard yet
+    float* terminals; // Required. We don't yet have truncations as standard yet
     int size;
     int tick;
     int max_steps;
     int agent_x;
     int agent_y;
+    int num_agents;
     unsigned char* intermediate_rewards;
     float int_r_coeff;
     float target_loss_pen_coeff;
@@ -538,6 +540,7 @@ void add_log(Boxoban* env) {
     env->log.episode_length += env->tick;
     env->log.episode_return += env->rewards[0];
     env->log.on_targets += env->on_target;
+    env->log.difficulty += env->difficulty_id;
     env->log.n++;
 }
 
@@ -638,10 +641,10 @@ int take_action(Boxoban* env, int action) {
 // Required function
 void c_step(Boxoban* env) {
     env->tick += 1;
-    env->terminals[0] = 0;
+    env->terminals[0] = 0.0;
     env->rewards[0] = 0.0;
        
-    int action = env->actions[0];
+    int action = (int)env->actions[0];
 
     float on_target = env->on_target;
     int int_r = take_action(env, action); //int_r _new_ tgts covered, modifies observations in place
@@ -655,7 +658,7 @@ void c_step(Boxoban* env) {
 
     //Terminals
     if (env->on_target == env->n_targets) {
-        env->terminals[0] = 1;
+        env->terminals[0] = 1.0;
         env->rewards[0] += 1.0;
         env->win = 1;
         add_log(env);
@@ -664,7 +667,7 @@ void c_step(Boxoban* env) {
     }
 
     if (env->tick >= env->max_steps) {
-        env->terminals[0] = 1;
+        env->terminals[0] = 1.0;
         env->rewards[0] -= 1.0;
         add_log(env);
         c_reset(env);

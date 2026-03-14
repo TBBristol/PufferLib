@@ -895,6 +895,14 @@ class WandbLogger:
         self.wandb = wandb
         self.run_id = wandb.run.id
 
+    # Keep interface consistent with Logger/NeptuneLogger
+    def init(self, args):
+        pass
+
+    # Keep interface consistent with Logger/NeptuneLogger
+    def log_cost(self, cost):
+        self.wandb.log({'cost': cost})
+
     def log(self, logs, step):
         self.wandb.log(logs, step=step)
 
@@ -994,7 +1002,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, verbose=Tr
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
-    backend = args['vec']['backend']
+    backend = args.get('vec', {}).get('backend', 'Serial')
     if backend != 'PufferEnv':
         backend = 'Serial'
 
