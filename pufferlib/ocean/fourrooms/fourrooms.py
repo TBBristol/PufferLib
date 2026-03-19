@@ -2,11 +2,11 @@ import gymnasium
 import numpy as np
 
 import pufferlib
-from pufferlib.ocean.boxoban import binding
+from pufferlib.ocean.fourrooms import binding
 
-class Boxoban(pufferlib.PufferEnv):
-    def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=10, buf=None, seed=0, difficulty=0, max_steps = 500,int_r_coeff = 0.1, target_loss_pen_coeff = 0.5):
-        self.shape = size*size*4 #agents walls boxes targets OHE
+class Fourrooms(pufferlib.PufferEnv):
+    def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, difficulty=0, max_steps = 200):
+        self.shape = size*size*3 #agent walls targets OHE
         self.difficulty = difficulty
         self._difficulty_stat_key = f"difficulty ({self.difficulty})"
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
@@ -16,12 +16,10 @@ class Boxoban(pufferlib.PufferEnv):
         self.num_agents = num_envs
         self.log_interval = log_interval
         self.max_steps = max_steps
-        self.int_r_coeff = int_r_coeff
-        self.target_loss_pen_coeff = target_loss_pen_coeff
 
         super().__init__(buf)
         self.c_envs = binding.vec_init(self.observations, self.actions, self.rewards,
-            self.terminals, self.truncations, num_envs, seed, size=size, max_steps = self.max_steps, int_r_coeff = self.int_r_coeff, target_loss_pen_coeff = self.target_loss_pen_coeff, difficulty=self.difficulty)
+            self.terminals, self.truncations, num_envs, seed, size=size, max_steps = self.max_steps)
  
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
@@ -52,7 +50,7 @@ class Boxoban(pufferlib.PufferEnv):
 if __name__ == '__main__':
     N = 1
 
-    env = Boxoban(num_envs=N)
+    env = Fourrooms(num_envs=N)
     env.reset()
     env.render()
     steps = 0
@@ -68,4 +66,4 @@ if __name__ == '__main__':
         steps += N
         i += 1
 
-    print('Boxoban SPS:', int(steps / (time.time() - start)))
+    print('Fourrooms SPS:', int(steps / (time.time() - start)))
