@@ -31,7 +31,6 @@ typedef struct {
     float score;
     float episode_return;
     float episode_length;
-    float on_targets;
     float n;
 } Log;
 
@@ -153,7 +152,6 @@ static inline void add_log(Fourrooms* env) {
     env->log.score += env->rewards[0];
     env->log.episode_length += (float)env->tick;
     env->log.episode_return += env->rewards[0];
-    env->log.on_targets += won;
     env->log.n += 1.0f;
 }
 
@@ -184,8 +182,6 @@ static inline void c_reset(Fourrooms* env) {
     set_entity(env, AGENT, env->agent_x, env->agent_y, 1);
     env->tick = 0;
     env->win = 0;
-    env->rewards[0] = 0.0f;
-    env->terminals[0] = 0;
 }
 
 static inline void move_entity(Fourrooms* env, unsigned char entity, int x, int y, int dx, int dy) {

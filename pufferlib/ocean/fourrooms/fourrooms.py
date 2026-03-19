@@ -5,10 +5,8 @@ import pufferlib
 from pufferlib.ocean.fourrooms import binding
 
 class Fourrooms(pufferlib.PufferEnv):
-    def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, difficulty=0, max_steps = 200):
+    def __init__(self, num_envs=1, render_mode=None, log_interval=128, size=11, buf=None, seed=0, max_steps = 200):
         self.shape = size*size*3 #agent walls targets OHE
-        self.difficulty = difficulty
-        self._difficulty_stat_key = f"difficulty ({self.difficulty})"
         self.single_observation_space = gymnasium.spaces.Box(low=0, high=1,
             shape=(self.shape,), dtype=np.uint8)
         self.single_action_space = gymnasium.spaces.Discrete(5)
@@ -35,7 +33,6 @@ class Fourrooms(pufferlib.PufferEnv):
         info = []
         if self.tick % self.log_interval == 0:
             log_dict = binding.vec_log(self.c_envs)
-            log_dict[self._difficulty_stat_key] = 1.0
             info.append(log_dict)
 
         return (self.observations, self.rewards,
