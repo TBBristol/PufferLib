@@ -165,6 +165,89 @@ class Actor(nn.Module):
             return action, log_prob, probs
 
 
+class OptionCriticNetwork(nn.Module):
+    def __init__(self, env, hidden_size=128, num_options=4):
+        super().__init__()
+        self.num_options = num_options
+        self.is_multidiscrete = isinstance(env.single_action_space,
+                pufferlib.spaces.MultiDiscrete)
+        self.is_continuous = isinstance(env.single_action_space,
+                pufferlib.spaces.Box)
+        if self.is_multidiscrete or self.is_continuous:
+            raise ValueError('OptionCriticNetwork currently supports discrete action spaces only')
+
+        try:
+            self.is_dict_obs = isinstance(env.env.observation_space, pufferlib.spaces.Dict)
+        except:
+            self.is_dict_obs = isinstance(env.observation_space, pufferlib.spaces.Dict)
+
+        if self.is_dict_obs:
+            self.dtype = pufferlib.pytorch.nativize_dtype(env.emulated)
+            input_size = int(sum(np.prod(v.shape) for v in env.env.observation_space.values()))
+        else:
+            input_size = int(np.prod(env.single_observation_space.shape))
+
+        self.num_actions = env.single_action_space.n
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+
+        self.q_u_head = nn.Linear(hidden_size, num_options * self.num_actions)
+        self.action_head = nn.Linear(hidden_size, num_options * self.num_actions)
+        self.termination_head = nn.Linear(hidden_size, num_options)
+
+    def encode(self, x):
+        batch_size = x.shape[0]
+        if self.is_dict_obs:
+            x = pufferlib.pytorch.nativize_tensor(x, self.dtype)
+            x = torch.cat([v.view(batch_size, -1) for v in x.values()], dim=1)
+        else:
+            x = x.view(batch_size, -1)
+
+        x = x.float()
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return x
+
+    def forward(self, x):
+        hidden = self.encode(x)
+        q_u = self.q_u_head(hidden).view(-1, self.num_options, self.num_actions)
+        action_logits = self.action_head(hidden).view(-1, self.num_options, self.num_actions)
+        termination_probs = torch.sigmoid(self.termination_head(hidden))
+        return q_u, action_logits, termination_probs
+
+    def get_option_q(self, x):
+        q_u, action_logits, _ = self.forward(x)
+        option_policy = torch.softmax(action_logits, dim=-1)
+        option_q = (option_policy * q_u).sum(dim=-1)
+        return option_q
+
+    def select_option(self, x, epsilon=0.0):
+        option_q = self.get_option_q(x)
+        greedy_options = option_q.argmax(dim=-1)
+
+        if epsilon <= 0:
+            return greedy_options
+
+        random_options = torch.randint(
+            self.num_options, (x.shape[0],), device=x.device
+        )
+        choose_random = torch.rand(x.shape[0], device=x.device) < epsilon
+        return torch.where(choose_random, random_options, greedy_options)
+
+    def get_action(self, x, options):
+        _, action_logits, _ = self.forward(x)
+        batch_idx = torch.arange(x.shape[0], device=x.device)
+        logits = action_logits[batch_idx, options]
+        dist = Categorical(logits=logits)
+        action = dist.sample()
+        return action, dist.log_prob(action), dist.entropy()
+
+    def get_termination(self, x, options):
+        _, _, termination_probs = self.forward(x)
+        batch_idx = torch.arange(x.shape[0], device=x.device)
+        return termination_probs[batch_idx, options]
+
+
 class Default(nn.Module):
     '''Default PyTorch policy. Flattens obs and applies a linear layer.
 

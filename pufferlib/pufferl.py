@@ -79,7 +79,7 @@ class PuffeRL:
 
         segments = int(config['buffer_size'] // total_agents)
         segments = max(segments, 1)
-        learning_starts = int(0.05 * config['buffer_size'])  # 5 % of total transitions
+        learning_starts = config['learning_starts'] if config['learning_starts'] else int(0.05 * config['buffer_size'])   # 5 % of total transitions
         if buffer_size < config['learning_starts']:
             raise pufferlib.APIUsageError(
                 f'buffer_size {buffer_size} must be >= learning_starts {config["learning_starts"]}'
@@ -96,8 +96,7 @@ class PuffeRL:
             device='cpu' if config['cpu_offload'] else device)
         self.actions = torch.zeros(segments, total_agents, *atn_space.shape, device=device,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
-        self.values = torch.zeros(segments, total_agents, device=device)
-        self.logprobs = torch.zeros(segments, total_agents, device=device)
+        self.options = torch.zeros(segments, total_agents, device=device, dtype=torch.long)
         self.rewards = torch.zeros(segments, total_agents, device=device)
         self.terminals = torch.zeros(segments, total_agents, device=device)
         self.truncations = torch.zeros(segments, total_agents, device=device)
@@ -113,7 +112,9 @@ class PuffeRL:
             device='cpu' if config['cpu_offload'] else device)
         self.act_buf = torch.zeros(total_agents, *atn_space.shape, device=device,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
-        self.has_state = torch.zeros(total_agents, device=device, dtype=torch.bool)
+        self.current_options = torch.full((total_agents,), -1, device=device, dtype=torch.long)
+        self.option_buf = torch.zeros(total_agents, device=device, dtype=torch.long)
+        self.has_prev_step = torch.zeros(total_agents, device=device, dtype=torch.bool)
         # Minibatching & gradient accumulation
         minibatch_size = config['minibatch_size']
 
@@ -122,6 +123,52 @@ class PuffeRL:
                 f'batch_size {buffer_size} must be >= minibatch_size {minibatch_size}'
             )
         self.minibatch_size = minibatch_size
+
+        # Rollout bookkeeping for the on-policy option-critic path. These are
+        # added before evaluate/train are fully switched over so we can migrate
+        # one function at a time without losing the current state.
+        rollout_batch_size = config.get('batch_size', 'auto')
+        rollout_horizon = config.get('bptt_horizon', 'auto')
+        if rollout_batch_size == 'auto' and rollout_horizon == 'auto':
+            rollout_batch_size = total_agents
+            rollout_horizon = 1
+        elif rollout_batch_size == 'auto':
+            rollout_batch_size = total_agents * rollout_horizon
+        elif rollout_horizon == 'auto':
+            rollout_horizon = max(1, rollout_batch_size // total_agents)
+
+        rollout_batch_size = int(rollout_batch_size)
+        rollout_horizon = int(rollout_horizon)
+        rollout_segments = rollout_batch_size // rollout_horizon
+        self.rollout_batch_size = rollout_batch_size
+        self.rollout_horizon = rollout_horizon
+        self.rollout_segments = rollout_segments
+
+        self.rollout_observations = torch.zeros(rollout_segments, rollout_horizon, *obs_space.shape,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            pin_memory=device == 'cuda' and config['cpu_offload'],
+            device='cpu' if config['cpu_offload'] else device)
+        self.rollout_actions = torch.zeros(rollout_segments, rollout_horizon, *atn_space.shape, device=device,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
+        self.rollout_options = torch.zeros(rollout_segments, rollout_horizon, device=device, dtype=torch.long)
+        self.rollout_logprobs = torch.zeros(rollout_segments, rollout_horizon, device=device)
+        self.rollout_option_values = torch.zeros(rollout_segments, rollout_horizon, device=device)
+        self.rollout_rewards = torch.zeros(rollout_segments, rollout_horizon, device=device)
+        self.rollout_terminals = torch.zeros(rollout_segments, rollout_horizon, device=device)
+        self.rollout_truncations = torch.zeros(rollout_segments, rollout_horizon, device=device)
+
+        self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
+        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
+        self.free_idx = total_agents
+        self.full_rows = 0
+
+        max_minibatch_size = int(config.get('max_minibatch_size', minibatch_size))
+        self.rollout_minibatch_size = min(minibatch_size, max_minibatch_size)
+        self.accumulate_minibatches = max(1, int(minibatch_size // max_minibatch_size))
+        update_epochs = int(config.get('update_epochs', 1))
+        self.total_minibatches = max(1, int(update_epochs * rollout_batch_size / self.rollout_minibatch_size))
+        self.minibatch_segments = max(1, self.rollout_minibatch_size // rollout_horizon)
+        self.total_epochs = max(1, int(config['total_timesteps'] // max(1, rollout_batch_size)))
 
         # Torch compile
         #self.uncompiled_policy = policy
@@ -132,54 +179,38 @@ class PuffeRL:
            # pufferlib.pytorch.sample_logits = torch.compile(pufferlib.pytorch.sample_logits, mode=config['compile_mode'])
 
           
+        if not isinstance(atn_space, pufferlib.spaces.Discrete):
+            raise pufferlib.APIUsageError('Option-Critic currently supports discrete action spaces only')
 
-        from pufferlib.models import SoftQNetwork, Actor
+        from pufferlib.models import OptionCriticNetwork
         hidden_size = config['hidden_size']
-        self.actor = Actor(vecenv.driver_env, hidden_size).to(device)
-        self.qf1 = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
-        self.qf2 = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
-        self.qf1_target = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
-        self.qf2_target = SoftQNetwork(vecenv.driver_env, hidden_size).to(device)
-        self.qf1_target.load_state_dict(self.qf1.state_dict())
-        self.qf2_target.load_state_dict(self.qf2.state_dict())
-        self.q_optimizer = torch.optim.Adam(list(self.qf1.parameters()) + list(self.qf2.parameters()), lr=config['q_lr'])
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=config['policy_lr'])
+        self.num_options = config['num_options']
+        self.option_epsilon = config['option_epsilon']
+        self.network = OptionCriticNetwork(
+            vecenv.driver_env,
+            hidden_size=hidden_size,
+            num_options=self.num_options,
+        ).to(device)
+        self.target_network = OptionCriticNetwork(
+            vecenv.driver_env,
+            hidden_size=hidden_size,
+            num_options=self.num_options,
+        ).to(device)
+        self.target_network.load_state_dict(self.network.state_dict())
+        learning_rate = config.get('learning_rate', config.get('policy_lr', config.get('q_lr')))
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=learning_rate)
         self.learning_starts = learning_starts
-        self.target_network_update_freq = config['target_network_update_freq']
-        self.policy_freq = config['policy_freq']
         self.tau = config['tau']
         self.warmup = True
-        
-        #DOES NOT HANDLE MULTD yet? 
-        if config['autotune']:
 
-            self.autotune = True
-            if self.is_continuous:
-                self.target_entropy = -torch.prod(torch.Tensor(atn_space.shape).to(device)).item()
-
-            else:
-                n_act = atn_space.n
-                self.target_entropy_scale = config['target_entropy_scale']
-                self.target_entropy = - self.target_entropy_scale *(torch.log(1/torch.tensor(float(n_act), device=device)))
-
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
-            self.alpha = self.log_alpha.exp().item()
-            self.a_optimizer = torch.optim.Adam([self.log_alpha], lr=config['q_lr'])
-        else:
-            self.alpha = config['alpha']
-            self.autotune = False
-
-        self.uncompiled_actor = self.actor
+        self.uncompiled_policy = self.network
 
         if config['compile']:
-            self.actor = torch.compile(self.actor, mode=config['compile_mode'])
-            self.actor.get_action = torch.compile(self.actor.get_action, mode=config['compile_mode'])
-            self.actor.get_action_eval = torch.compile(self.actor.get_action_eval, mode=config['compile_mode'])
-
-            self.qf1 = torch.compile(self.qf1, mode=config['compile_mode'])
-            self.qf2 = torch.compile(self.qf2, mode=config['compile_mode'])
-            self.qf1_target = torch.compile(self.qf1_target, mode=config['compile_mode'])
-            self.qf2_target = torch.compile(self.qf2_target, mode=config['compile_mode'])
+            self.network = torch.compile(self.network, mode=config['compile_mode'])
+            self.network.select_option = torch.compile(self.network.select_option, mode=config['compile_mode'])
+            self.network.get_action = torch.compile(self.network.get_action, mode=config['compile_mode'])
+            self.network.get_termination = torch.compile(self.network.get_termination, mode=config['compile_mode'])
+            self.target_network = torch.compile(self.target_network, mode=config['compile_mode'])
      
 
 
@@ -205,6 +236,7 @@ class PuffeRL:
         self.global_step = 0
         self.last_log_step = 0
         self.last_log_time = time.time()
+        self.last_dashboard_time = self.last_log_time
         self.start_time = time.time()
         self.utilization = Utilization()
         self.profile = Profile()
@@ -217,7 +249,7 @@ class PuffeRL:
         self.runtime = 0
 
         # Dashboard
-        models = [self.actor, self.qf1, self.qf2, self.qf1_target, self.qf2_target]
+        models = [self.network, self.target_network]
         self.model_size = sum(p.numel() for m in models for p in m.parameters() if p.requires_grad)
         self.print_dashboard(clear=True)
 
@@ -232,14 +264,6 @@ class PuffeRL:
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
 
-    @property
-    def eps(self):
-        if self.epoch == self.last_log_epoch:
-            return 0
-        rate = (self.epoch - self.last_log_epoch) / (time.time() - self.last_log_time)
-        return round(rate, 1)
-
-    
     def evaluate(self):
         profile = self.profile
         epoch = self.epoch
@@ -250,8 +274,8 @@ class PuffeRL:
         device = config['device']
         env_id = slice(0, 1)
 
-
-        while self.warmup or env_id.stop < self.total_agents:
+        self.full_rows = 0
+        while self.full_rows < self.rollout_segments:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
@@ -268,47 +292,78 @@ class PuffeRL:
             d = torch.as_tensor(d).to(device)#, non_blocking=True)
 
             t = torch.as_tensor(t).to(device)#, non_blocking=True)
-
-
-            #TODO NEXT OBS HANDLING IN TRUNCTIONS. AND TERMS?
+            r = torch.clamp(r, -1, 1)
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
+                current_options = self.current_options[env_id]
+                option_q = self.network.get_option_q(o_device)
 
-                if self.global_step <= self.learning_starts:
-                    action = np.array([self.vecenv.single_action_space.sample() for _ in range(env_id.stop-env_id.start)])
-                else:
-                    action = self.actor.get_action_eval(o_device)
-                    action.detach()
+                needs_option = current_options < 0
+                if needs_option.any():
+                    current_options[needs_option] = self.network.select_option(
+                        o_device[needs_option], epsilon=self.option_epsilon
+                    )
+
+                keeps_option = ~needs_option
+                if keeps_option.any():
+                    beta = self.network.get_termination(
+                        o_device[keeps_option],
+                        current_options[keeps_option],
+                    )
+                    terminated = torch.bernoulli(beta).bool()
+                    reset_option = terminated | done_mask[keeps_option]
+                    if reset_option.any():
+                        keep_options = current_options[keeps_option]
+                        keep_options[reset_option] = self.network.select_option(
+                            o_device[keeps_option][reset_option],
+                            epsilon=self.option_epsilon,
+                        )
+                        current_options[keeps_option] = keep_options
+                    self.stats['option/termination_prob'].append(beta.mean().item())
+                    self.stats['option/switch_rate'].append(reset_option.float().mean().item())
+
+                option_q = self.network.get_option_q(o_device)
+                action, logprob, _ = self.network.get_action(o_device, current_options)
+                active_option_values = option_q.gather(1, current_options.unsqueeze(1)).flatten()
+                self.stats['option/value'].append(active_option_values.mean().item())
+                self.stats['option/active_count'].append(float(torch.unique(current_options).numel()))
+                for i in range(self.num_options):
+                    self.stats[f'option/occupancy_{i}'].append(
+                        (current_options == i).float().mean().item()
+                    )
+                self.current_options[env_id] = current_options
 
             profile('eval_copy', epoch)
             with torch.no_grad():
+                l = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(
+                    self.ep_indices[env_id.start].item(),
+                    1 + self.ep_indices[env_id.stop - 1].item(),
+                )
 
-                if self.has_state[env_id].any():
+                if config['cpu_offload']:
+                    self.rollout_observations[batch_rows, l] = o
+                else:
+                    self.rollout_observations[batch_rows, l] = o_device
 
-                    #MAUY NEED TO HANDLE REAL NEXT OBS FROM TRUNCTIONS
+                self.rollout_actions[batch_rows, l] = action
+                self.rollout_options[batch_rows, l] = current_options
+                self.rollout_logprobs[batch_rows, l] = logprob
+                self.rollout_option_values[batch_rows, l] = active_option_values
+                self.rollout_rewards[batch_rows, l] = r
+                self.rollout_terminals[batch_rows, l] = d.float()
+                self.rollout_truncations[batch_rows, l] = t.float()
 
+                self.ep_lengths[env_id] += 1
+                if l + 1 >= self.rollout_horizon:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=device).int()
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
 
-                    if config['cpu_offload']:
-                        self.observations[self.pos, env_id] = self.obs_buf[env_id]
-                        self.next_observations[self.pos, env_id] = o
-                    else:
-                        self.observations[self.pos, env_id] = self.obs_buf[env_id].to(device)
-                        self.next_observations[self.pos, env_id] = o_device
-
-                    done_mask = (d.bool() | t.bool())  #To handle truncs so we dont false bootstrap
-
-                    self.actions[self.pos, env_id] = self.act_buf[env_id]
-                    self.rewards[self.pos, env_id] = r
-                    self.terminals[self.pos, env_id] = done_mask.float()
-                    self.truncations[self.pos, env_id] = t
-
-                    if env_id.stop == self.total_agents:
-                        self.pos += 1
-
-             
-                if isinstance(action, torch.Tensor):
-                    action = action.cpu().numpy()
+                action = action.cpu().numpy()
                 
 
             profile('eval_misc', epoch)
@@ -320,26 +375,14 @@ class PuffeRL:
                         self.stats[k].extend(v)
                     else:
                         self.stats[k].append(v)
-            with torch.no_grad():
-
-                if config['cpu_offload']:
-                    self.obs_buf[env_id] = o
-                else:
-                    self.obs_buf[env_id] = o_device
-                self.has_state[env_id] = True 
-                self.act_buf[env_id] = torch.as_tensor(action, device=device)
 
             profile('env', epoch)
             self.vecenv.send(action)
 
-            if self.pos*self.total_agents >= self.learning_starts:
-                self.warmup = False
-
-        if self.pos + 1 >= self.segments:
-            self.pos = 0
-            self.buffer_full = True
-
         env_id = slice(0, 1)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        self.ep_lengths.zero_()
 
 
         profile('eval_misc', epoch)
@@ -350,159 +393,108 @@ class PuffeRL:
     def train(self):
         profile = self.profile
         epoch = self.epoch
+        profile('train', epoch)
+        profile('train_misc', epoch, nest=True)
         losses = defaultdict(float)
         config = self.config
         device = config['device']
-        self.gamma = config['gamma']
+        critic_coef = config['critic_coef']
+        deliberation_cost = config['deliberation_cost']
+        self.optimizer.zero_grad()
 
-        updates = max(1, int(self.total_agents * config['train_ratio']))
-
-        for _ in range(updates):
-            profile('train', epoch)
-
-
-
-            profile('train_misc', epoch, nest=True)
+        for mb in range(self.total_minibatches):
+            profile('train_misc', epoch)
             self.amp_context.__enter__()
 
+            idx = torch.randint(0, self.rollout_segments, (self.minibatch_segments,), device=device)
+
             profile('train_copy', epoch)
-         
-            
-            if self.buffer_full:
-                row_idx = torch.randint(0, self.segments, (self.minibatch_size,), device=device)
-            else:
-                row_idx = torch.randint(1, self.pos, (self.minibatch_size,),device=device)
-            agent_idx = torch.randint(0, self.total_agents, (self.minibatch_size,),device=device)
+            mb_obs = self.rollout_observations[idx, :-1]
+            mb_next_obs = self.rollout_observations[idx, 1:]
+            mb_actions = self.rollout_actions[idx, :-1]
+            mb_options = self.rollout_options[idx, :-1]
+            mb_rewards = self.rollout_rewards[idx, 1:]
+            mb_terminals = self.rollout_terminals[idx, 1:]
 
-            mb_obs = self.observations[row_idx, agent_idx]
-            mb_next_obs = self.next_observations[row_idx, agent_idx]
-            mb_actions = self.actions[row_idx, agent_idx]
-            mb_rewards = self.rewards[row_idx, agent_idx].view(-1,1)
-            mb_terminals = self.terminals[row_idx, agent_idx].view(-1,1)
-            mb_truncations = self.truncations[row_idx, agent_idx].view(-1,1)
-           
-           
-            
-            
+            profile('train_forward', epoch)
+            mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+            mb_next_obs = mb_next_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+            mb_actions = mb_actions.reshape(-1)
+            mb_options = mb_options.reshape(-1)
+            mb_rewards = mb_rewards.reshape(-1)
+            mb_terminals = mb_terminals.reshape(-1)
+
+            q_u, action_logits, _ = self.network(mb_obs)
+            option_policy = torch.softmax(action_logits, dim=-1)
+            option_q = (option_policy * q_u).sum(dim=-1)
+
+            batch_idx = torch.arange(mb_options.shape[0], device=device)
+            active_logits = action_logits[batch_idx, mb_options]
+            dist = torch.distributions.Categorical(logits=active_logits)
+            logprob = dist.log_prob(mb_actions.long())
+            entropy = dist.entropy()
+            q_u_active = q_u[batch_idx, mb_options, mb_actions.long()]
+            q_option_active = option_q.gather(1, mb_options.unsqueeze(1)).squeeze(1)
+
             with torch.no_grad():
+                next_q_u, next_action_logits, next_beta_all = self.network(mb_next_obs)
+                next_option_policy = torch.softmax(next_action_logits, dim=-1)
+                next_option_q_all = (next_option_policy * next_q_u).sum(dim=-1)
+                next_q_option = next_option_q_all.gather(1, mb_options.unsqueeze(1)).squeeze(1)
+                next_q_best = next_option_q_all.max(dim=1).values
+                next_beta = next_beta_all.gather(1, mb_options.unsqueeze(1)).squeeze(1)
 
-                profile('train_actor_forward', epoch)
-                next_state_actions, next_state_logpi, next_state_action_probs = self.actor.get_action(mb_next_obs)
+                target = mb_rewards + (1 - mb_terminals) * config['gamma'] * (
+                    (1 - next_beta) * next_q_option + next_beta * next_q_best
+                )
 
-                profile('train_q_forward', epoch)
-                if self.is_continuous:
-                    qf1_next_target = self.qf1_target(mb_next_obs, next_state_actions)
-                    qf2_next_target = self.qf2_target(mb_next_obs, next_state_actions)
-                    min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi
-                    next_q_value = mb_rewards + (1 - mb_terminals) * self.gamma * min_qf_next_target
+            critic_loss = torch.nn.functional.mse_loss(q_u_active, target)
 
-                else:
-                    qf1_next_target = self.qf1_target(mb_next_obs)
-                    qf2_next_target = self.qf2_target(mb_next_obs)
-                    min_qf_next_target = next_state_action_probs*(torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_logpi)
-                    min_qf_next_target = min_qf_next_target.sum(dim=1)
-                    next_q_value = mb_rewards.squeeze(1) + (1 - mb_terminals.squeeze(1)) * self.gamma * min_qf_next_target
+            policy_advantage = (q_u_active - q_option_active).detach()
+            intra_option_policy_loss = -(logprob * policy_advantage).mean()
 
+            _, _, beta_all = self.network(mb_next_obs)
+            beta_option = beta_all.gather(1, mb_options.unsqueeze(1)).squeeze(1)
+            termination_adv = (next_q_option - next_q_best + deliberation_cost).detach()
+            termination_loss = (beta_option * termination_adv * (1 - mb_terminals)).mean()
 
+            entropy_loss = entropy.mean()
+            loss = (
+                intra_option_policy_loss
+                + critic_coef * critic_loss
+                + termination_loss
+                - config['ent_coef'] * entropy_loss
+            )
 
-
-            if self.is_continuous:
-                qf1_a_values = self.qf1(mb_obs, mb_actions)
-                qf2_a_values = self.qf2(mb_obs, mb_actions)
-            else:
-                qf1_values = self.qf1(mb_obs)
-                qf2_values = self.qf2(mb_obs)
-                qf1_a_values = qf1_values.gather(1, mb_actions.long().unsqueeze(1)).view(-1)  
-                qf2_a_values = qf2_values.gather(1, mb_actions.long().unsqueeze(1)).view(-1)
-
-
-            qf1_loss = torch.nn.functional.mse_loss(qf1_a_values, next_q_value)
-            qf2_loss = torch.nn.functional.mse_loss(qf2_a_values, next_q_value)
-            qf_loss = qf1_loss + qf2_loss
-
-                             
-            self.q_optimizer.zero_grad()
-            qf_loss.backward()
-            self.q_optimizer.step()
-
-            if self.epoch % self.policy_freq == 0:
-                for _ in range(self.policy_freq):
-
-                    profile('train_pol_actor_forward', epoch)
-                    pi, log_pi,action_probs = self.actor.get_action(mb_obs) #actoin probs for discrete, pi is action
-
-                    profile('train_pol_q_forward', epoch)
-                    if self.is_continuous:
-                        qf1_pi = self.qf1(mb_obs, pi)
-                        qf2_pi = self.qf2(mb_obs, pi)
-                    else:
-                        qf1_pi = self.qf1(mb_obs)
-                        qf2_pi = self.qf2(mb_obs)
-                    min_qf_pi = torch.min(qf1_pi, qf2_pi)
-                    if self.is_continuous:
-                        actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
-                    else:
-                        actor_loss = (action_probs * ((self.alpha * log_pi) - min_qf_pi)).sum(dim=1).mean()
-
-
-
-                    self.actor_optimizer.zero_grad()
-                    actor_loss.backward()
-                    self.actor_optimizer.step()
-
-                    losses['actor_loss'] = actor_loss.item()
-
-                    if self.autotune:
-                        with torch.no_grad():
-                            profile('train_tune_actor_forward', epoch)
-                            _, log_pi, action_probs = self.actor.get_action(mb_obs)
-                        if self.is_continuous:
-                            alpha_loss = (-self.log_alpha.exp() * (log_pi + self.target_entropy)).mean()
-                        else:
-                            alpha_loss = (action_probs.detach() * (-self.log_alpha.exp() * (log_pi + self.target_entropy).detach())).sum(dim=1).mean()
-
-                         
-                        self.a_optimizer.zero_grad()
-                        alpha_loss.backward()
-                        self.a_optimizer.step()
-                        self.alpha = self.log_alpha.exp().item()
-
-
-
-                        losses['alpha_loss'] = alpha_loss.item()
-                        losses['alpha'] = self.alpha
-                                
-
-
-            if self.epoch % self.target_network_update_freq == 0:
-                profile('train_network_update_copy', epoch)
-                for param, target_param in zip(self.qf1.parameters(), self.qf1_target.parameters()):
-                    target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-                for param, target_param in zip(self.qf2.parameters(), self.qf2_target.parameters()):
-                    target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+            profile('learn', epoch)
+            loss.backward()
+            if (mb + 1) % self.accumulate_minibatches == 0:
+                torch.nn.utils.clip_grad_norm_(self.network.parameters(), config['max_grad_norm'])
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
             profile('train_misc', epoch)
-        
-            # Logging
-            profile('train_misc', epoch)
-            losses['qf1_values'] = qf1_a_values.mean().item()
-            losses['qf2_values'] = qf2_a_values.mean().item()
-            losses['qf1_loss'] = qf1_loss.item()
-            losses['qf2_loss'] = qf2_loss.item()
-            losses['qf_loss'] = qf_loss.item()
+            losses['intra_option_policy_loss'] += intra_option_policy_loss.item() / self.total_minibatches
+            losses['critic_loss'] += critic_loss.item() / self.total_minibatches
+            losses['termination_loss'] += termination_loss.item() / self.total_minibatches
+            losses['entropy'] += entropy_loss.item() / self.total_minibatches
+            losses['q_value'] += q_u_active.mean().item() / self.total_minibatches
+            losses['beta'] += beta_option.mean().item() / self.total_minibatches
 
-            profile.end()
-            logs = None
-            self.epoch += 1
+        profile.end()
+        logs = None
+        self.epoch += 1
 
         curr_time = time.time()
         self.runtime = curr_time - self.start_time
 
-        done_training = self.global_step >= config['total_timesteps'] or self.runtime > config['max_runtime']
+        done_training = self.global_step >= config['total_timesteps']
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            self.print_dashboard()
+            if done_training or time.time() > self.last_dashboard_time + 1.0:
+                self.print_dashboard()
+                self.last_dashboard_time = time.time()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -529,7 +521,6 @@ class PuffeRL:
         agent_steps = int(dist_sum(self.global_step, device))
         logs = {
             'SPS': dist_sum(self.sps, device),
-            'EPS': dist_sum(self.eps, device),
             'agent_steps': agent_steps,
             'uptime': time.time() - self.start_time,
             'epoch': int(dist_sum(self.epoch, device)),
@@ -575,7 +566,7 @@ class PuffeRL:
         if os.path.exists(model_path):
             return model_path
 
-        torch.save(self.uncompiled_actor.state_dict(), model_path)
+        torch.save(self.uncompiled_policy.state_dict(), model_path)
 
         state = {
             'global_step': self.global_step,
@@ -593,7 +584,6 @@ class PuffeRL:
             c1='[cyan]', c2='[dim default]', b1='[bright_cyan]', b2='[default]'):
         config = self.config
         sps = dist_sum(self.sps, config['device'])
-        eps = dist_sum(self.eps, config['device'])
         agent_steps = dist_sum(self.global_step, config['device'])
         if torch.distributed.is_initialized():
            if torch.distributed.get_rank() != 0:
@@ -632,8 +622,6 @@ class PuffeRL:
         s.add_row(f'{b2}Params', abbreviate(self.model_size, b2, c2))
         s.add_row(f'{b2}Steps', abbreviate(agent_steps, b2, c2))
         s.add_row(f'{b2}SPS', abbreviate(sps, b2, c2))
-        s.add_row(f'{b2}EPS', abbreviate(eps, b2, c2))
-        s.add_row(f'{b2}Gradient_steps', f'{b2}{self.epoch}')
         s.add_row(f'{b2}Epoch', f'{b2}{self.epoch}')
         s.add_row(f'{b2}Uptime', duration(self.uptime, b2, c2))
         s.add_row(f'{b2}Remaining', remaining)
@@ -649,11 +637,6 @@ class PuffeRL:
         p.add_row(*fmt_perf('  Copy', b2, delta, profile.eval_copy, b2, c2))
         p.add_row(*fmt_perf('  Misc', b2, delta, profile.eval_misc, b2, c2))
         p.add_row(*fmt_perf('Train', b1, delta, profile.train, b2, c2))
-        p.add_row(*fmt_perf('  Act_Forward', c2, delta, profile.train_actor_forward, b2, c2))
-        p.add_row(*fmt_perf('  Q_Forward', c2, delta, profile.train_q_forward, b2, c2))
-        p.add_row(*fmt_perf('  Pol_Act_Forward', c2, delta, profile.train_pol_actor_forward, b2, c2))
-        p.add_row(*fmt_perf('  Pol_Q_Forward', c2, delta, profile.train_pol_q_forward, b2, c2))
-        p.add_row(*fmt_perf('  Tune_Act_Forward', c2, delta, profile.train_tune_actor_forward, b2, c2))
         p.add_row(*fmt_perf('  Forward', b2, delta, profile.train_forward, b2, c2))
         p.add_row(*fmt_perf('  Learn', b2, delta, profile.learn, b2, c2))
         p.add_row(*fmt_perf('  Copy', b2, delta, profile.train_copy, b2, c2))
@@ -990,7 +973,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, should_sto
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     all_logs = []
-    while pufferl.global_step < train_config['total_timesteps'] and pufferl.runtime < args['train']['max_runtime']:
+    while pufferl.global_step < train_config['total_timesteps']:
         if train_config['device'] == 'cuda':
             torch.compiler.cudagraph_mark_step_begin()
         pufferl.evaluate()
