@@ -312,7 +312,13 @@ class PuffeRL:
                         current_options[keeps_option],
                     )
                     terminated = torch.bernoulli(beta).bool()
-                    reset_option = terminated | done_mask[keeps_option]
+                    done_mask_tensor = torch.as_tensor(
+                        done_mask,
+                        device=terminated.device,
+                        dtype=torch.bool,
+                    )[keeps_option]
+                  
+                    reset_option = terminated | done_mask_tensor
                     if reset_option.any():
                         keep_options = current_options[keeps_option]
                         keep_options[reset_option] = self.network.select_option(
