@@ -142,6 +142,10 @@ class PuffeRL:
         rollout_batch_size = int(rollout_batch_size)
         rollout_horizon = int(rollout_horizon)
         rollout_segments = rollout_batch_size // rollout_horizon
+        if total_agents > rollout_segments:
+            raise pufferlib.APIUsageError(
+                f'Total agents {total_agents} must be <= rollout segments {rollout_segments}'
+            )
         self.rollout_batch_size = rollout_batch_size
         self.rollout_horizon = rollout_horizon
         self.rollout_segments = rollout_segments
@@ -174,6 +178,10 @@ class PuffeRL:
         update_epochs = int(config.get('update_epochs', 1))
         self.total_minibatches = max(1, int(update_epochs * rollout_batch_size / self.rollout_minibatch_size))
         self.minibatch_segments = max(1, self.rollout_minibatch_size // rollout_horizon)
+        if self.minibatch_segments * rollout_horizon != self.rollout_minibatch_size:
+            raise pufferlib.APIUsageError(
+                f'minibatch_size {self.rollout_minibatch_size} must be divisible by bptt_horizon {rollout_horizon}'
+            )
         self.total_epochs = max(1, int(config['total_timesteps'] // max(1, rollout_batch_size)))
 
         # Torch compile
