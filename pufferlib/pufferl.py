@@ -141,47 +141,34 @@ class PuffeRL:
 
         rollout_batch_size = int(rollout_batch_size)
         rollout_horizon = int(rollout_horizon)
-        rollout_segments = rollout_batch_size // rollout_horizon
-        if total_agents > rollout_segments:
-            raise pufferlib.APIUsageError(
-                f'Total agents {total_agents} must be <= rollout segments {rollout_segments}'
-            )
         self.rollout_batch_size = rollout_batch_size
         self.rollout_horizon = rollout_horizon
-        self.rollout_segments = rollout_segments
+        self.rollout_segments = max(1, rollout_batch_size // max(1, rollout_horizon))
 
-        self.rollout_observations = torch.zeros(rollout_segments, rollout_horizon, *obs_space.shape,
+        self.rollout_observations = torch.zeros(rollout_batch_size, *obs_space.shape,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
-        self.rollout_next_observations = torch.zeros(rollout_segments, rollout_horizon, *obs_space.shape,
+        self.rollout_next_observations = torch.zeros(rollout_batch_size, *obs_space.shape,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
-        self.rollout_actions = torch.zeros(rollout_segments, rollout_horizon, *atn_space.shape, device=device,
+        self.rollout_actions = torch.zeros(rollout_batch_size, *atn_space.shape, device=device,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
-        self.rollout_options = torch.zeros(rollout_segments, rollout_horizon, device=device, dtype=torch.long)
-        self.rollout_logprobs = torch.zeros(rollout_segments, rollout_horizon, device=device)
-        self.rollout_option_values = torch.zeros(rollout_segments, rollout_horizon, device=device)
-        self.rollout_rewards = torch.zeros(rollout_segments, rollout_horizon, device=device)
-        self.rollout_terminals = torch.zeros(rollout_segments, rollout_horizon, device=device)
-        self.rollout_truncations = torch.zeros(rollout_segments, rollout_horizon, device=device)
-
-        self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-        self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
-        self.free_idx = total_agents
-        self.full_rows = 0
+        self.rollout_options = torch.zeros(rollout_batch_size, device=device, dtype=torch.long)
+        self.rollout_logprobs = torch.zeros(rollout_batch_size, device=device)
+        self.rollout_option_values = torch.zeros(rollout_batch_size, device=device)
+        self.rollout_rewards = torch.zeros(rollout_batch_size, device=device)
+        self.rollout_terminals = torch.zeros(rollout_batch_size, device=device)
+        self.rollout_truncations = torch.zeros(rollout_batch_size, device=device)
+        self.rollout_pos = 0
 
         max_minibatch_size = int(config.get('max_minibatch_size', minibatch_size))
         self.rollout_minibatch_size = min(minibatch_size, max_minibatch_size)
         self.accumulate_minibatches = max(1, int(minibatch_size // max_minibatch_size))
         update_epochs = int(config.get('update_epochs', 1))
         self.total_minibatches = max(1, int(update_epochs * rollout_batch_size / self.rollout_minibatch_size))
-        self.minibatch_segments = max(1, self.rollout_minibatch_size // rollout_horizon)
-        if self.minibatch_segments * rollout_horizon != self.rollout_minibatch_size:
-            raise pufferlib.APIUsageError(
-                f'minibatch_size {self.rollout_minibatch_size} must be divisible by bptt_horizon {rollout_horizon}'
-            )
+        self.minibatch_segments = max(1, self.rollout_minibatch_size // max(1, rollout_horizon))
         self.total_epochs = max(1, int(config['total_timesteps'] // max(1, rollout_batch_size)))
 
         # Torch compile
@@ -288,8 +275,8 @@ class PuffeRL:
         device = config['device']
         env_id = slice(0, 1)
 
-        self.full_rows = 0
-        while self.full_rows < self.rollout_segments:
+        self.rollout_pos = 0
+        while self.rollout_pos < self.rollout_batch_size:
             profile('env', epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
 
@@ -372,33 +359,24 @@ class PuffeRL:
             with torch.no_grad():
                 next_obs = o if config['cpu_offload'] else o_device
                 prev_step_mask = self.has_prev_step[env_id].clone()
-                ep_lengths = self.ep_lengths[env_id].clone()
-                ep_indices = self.ep_indices[env_id].clone()
 
                 if prev_step_mask.any():
-                    rows = ep_indices[prev_step_mask].long()
-                    cols = ep_lengths[prev_step_mask].long()
-
-                    self.rollout_observations[rows, cols] = self.obs_buf[env_id][prev_step_mask]
-                    self.rollout_next_observations[rows, cols] = next_obs[prev_step_mask]
-                    self.rollout_actions[rows, cols] = self.act_buf[env_id][prev_step_mask]
-                    self.rollout_options[rows, cols] = self.option_buf[env_id][prev_step_mask]
-                    self.rollout_logprobs[rows, cols] = self.logprob_buf[env_id][prev_step_mask]
-                    self.rollout_option_values[rows, cols] = self.option_value_buf[env_id][prev_step_mask]
-                    self.rollout_rewards[rows, cols] = r[prev_step_mask]
-                    self.rollout_terminals[rows, cols] = d.float()[prev_step_mask]
-                    self.rollout_truncations[rows, cols] = t.float()[prev_step_mask]
-
-                    ep_lengths[prev_step_mask] += 1
-                    full_mask = ep_lengths >= self.rollout_horizon
-                    if full_mask.any():
-                        num_full = int(full_mask.sum().item())
-                        ep_indices[full_mask] = self.free_idx + torch.arange(
-                            num_full, device=device, dtype=torch.int32
-                        )
-                        ep_lengths[full_mask] = 0
-                        self.free_idx += num_full
-                        self.full_rows += num_full
+                    num_transitions = int(prev_step_mask.sum().item())
+                    remaining = self.rollout_batch_size - self.rollout_pos
+                    num_transitions = min(num_transitions, remaining)
+                    if num_transitions > 0:
+                        selected = torch.nonzero(prev_step_mask, as_tuple=False).squeeze(1)[:num_transitions]
+                        rows = slice(self.rollout_pos, self.rollout_pos + num_transitions)
+                        self.rollout_observations[rows] = self.obs_buf[env_id][selected]
+                        self.rollout_next_observations[rows] = next_obs[selected]
+                        self.rollout_actions[rows] = self.act_buf[env_id][selected]
+                        self.rollout_options[rows] = self.option_buf[env_id][selected]
+                        self.rollout_logprobs[rows] = self.logprob_buf[env_id][selected]
+                        self.rollout_option_values[rows] = self.option_value_buf[env_id][selected]
+                        self.rollout_rewards[rows] = r[selected]
+                        self.rollout_terminals[rows] = d.float()[selected]
+                        self.rollout_truncations[rows] = t.float()[selected]
+                        self.rollout_pos += num_transitions
 
                 obs_buf = self.obs_buf[env_id]
                 act_buf = self.act_buf[env_id]
@@ -421,8 +399,6 @@ class PuffeRL:
                 self.logprob_buf[env_id] = logprob_buf
                 self.option_value_buf[env_id] = option_value_buf
                 self.has_prev_step[env_id] = has_prev_step
-                self.ep_lengths[env_id] = ep_lengths
-                self.ep_indices[env_id] = ep_indices
                 action = action.cpu().numpy()
                 
 
@@ -438,11 +414,6 @@ class PuffeRL:
 
             profile('env', epoch)
             self.vecenv.send(action)
-
-        env_id = slice(0, 1)
-        self.free_idx = self.total_agents
-        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
-        self.ep_lengths.zero_()
 
 
         profile('eval_misc', epoch)
@@ -461,12 +432,15 @@ class PuffeRL:
         critic_coef = config['critic_coef']
         deliberation_cost = config['deliberation_cost']
         self.optimizer.zero_grad()
+        batch_size = self.rollout_pos
+        if batch_size == 0:
+            return None
 
         for mb in range(self.total_minibatches):
             profile('train_misc', epoch)
             self.amp_context.__enter__()
 
-            idx = torch.randint(0, self.rollout_segments, (self.minibatch_segments,), device=device)
+            idx = torch.randint(0, batch_size, (self.rollout_minibatch_size,), device=device)
 
             profile('train_copy', epoch)
             mb_obs = self.rollout_observations[idx]
@@ -477,13 +451,6 @@ class PuffeRL:
             mb_terminals = self.rollout_terminals[idx]
 
             profile('train_forward', epoch)
-            mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-            mb_next_obs = mb_next_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
-            mb_actions = mb_actions.reshape(-1)
-            mb_options = mb_options.reshape(-1)
-            mb_rewards = mb_rewards.reshape(-1)
-            mb_terminals = mb_terminals.reshape(-1)
-
             q_u, action_logits, _ = self.network(mb_obs)
             option_policy = torch.softmax(action_logits, dim=-1)
             option_q = (option_policy * q_u).sum(dim=-1)
