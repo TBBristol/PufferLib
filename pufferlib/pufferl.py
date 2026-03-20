@@ -104,7 +104,7 @@ class PuffeRL:
         self.pos = 0
         self.buffer_full = False
 
-        #buffers to hold obs and actions until next step so it can align in the buffers above 
+        # Per-agent cached step state for aligned on-policy transition writes.
 
         self.obs_buf = torch.zeros(total_agents, *obs_space.shape,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
@@ -114,6 +114,8 @@ class PuffeRL:
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
         self.current_options = torch.full((total_agents,), -1, device=device, dtype=torch.long)
         self.option_buf = torch.zeros(total_agents, device=device, dtype=torch.long)
+        self.logprob_buf = torch.zeros(total_agents, device=device)
+        self.option_value_buf = torch.zeros(total_agents, device=device)
         self.has_prev_step = torch.zeros(total_agents, device=device, dtype=torch.bool)
         # Minibatching & gradient accumulation
         minibatch_size = config['minibatch_size']
@@ -145,6 +147,10 @@ class PuffeRL:
         self.rollout_segments = rollout_segments
 
         self.rollout_observations = torch.zeros(rollout_segments, rollout_horizon, *obs_space.shape,
+            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
+            pin_memory=device == 'cuda' and config['cpu_offload'],
+            device='cpu' if config['cpu_offload'] else device)
+        self.rollout_next_observations = torch.zeros(rollout_segments, rollout_horizon, *obs_space.shape,
             dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
             pin_memory=device == 'cuda' and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
@@ -296,81 +302,119 @@ class PuffeRL:
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
-                current_options = self.current_options[env_id]
-                option_q = self.network.get_option_q(o_device)
+                current_options = self.current_options[env_id].clone()
                 done_mask_tensor = torch.as_tensor(
                     done_mask,
                     device=current_options.device,
                     dtype=torch.bool,
                 )
+                alive_mask = ~done_mask_tensor
+                action = torch.zeros_like(self.act_buf[env_id])
+                logprob = torch.zeros(env_id.stop - env_id.start, device=device)
+                active_option_values = torch.zeros(env_id.stop - env_id.start, device=device)
 
-                needs_option = current_options < 0
-                if needs_option.any():
-                    current_options[needs_option] = self.network.select_option(
-                        o_device[needs_option], epsilon=self.option_epsilon
-                    )
+                if alive_mask.any():
+                    alive_obs = o_device[alive_mask]
+                    alive_options = current_options[alive_mask]
 
-                keeps_option = ~needs_option
-                if keeps_option.any():
-                    beta = self.network.get_termination(
-                        o_device[keeps_option],
-                        current_options[keeps_option],
-                    )
-                    terminated = torch.bernoulli(beta).bool()
-                    reset_option = terminated
-                    if reset_option.any():
-                        keep_options = current_options[keeps_option]
-                        keep_options[reset_option] = self.network.select_option(
-                            o_device[keeps_option][reset_option],
-                            epsilon=self.option_epsilon,
+                    needs_option = alive_options < 0
+                    if needs_option.any():
+                        alive_options[needs_option] = self.network.select_option(
+                            alive_obs[needs_option], epsilon=self.option_epsilon
                         )
-                        current_options[keeps_option] = keep_options
-                    self.stats['option/termination_prob'].append(beta.mean().item())
-                    self.stats['option/switch_rate'].append(reset_option.float().mean().item())
 
-                option_q = self.network.get_option_q(o_device)
-                action, logprob, _ = self.network.get_action(o_device, current_options)
-                active_option_values = option_q.gather(1, current_options.unsqueeze(1)).flatten()
-                self.stats['option/value'].append(active_option_values.mean().item())
-                self.stats['option/active_count'].append(float(torch.unique(current_options).numel()))
-                for i in range(self.num_options):
-                    self.stats[f'option/occupancy_{i}'].append(
-                        (current_options == i).float().mean().item()
-                    )
-                # Done envs reset on the following send, so force them to
-                # pick a fresh option from the reset observation next recv.
+                    keeps_option = ~needs_option
+                    if keeps_option.any():
+                        beta = self.network.get_termination(
+                            alive_obs[keeps_option],
+                            alive_options[keeps_option],
+                        )
+                        terminated = torch.bernoulli(beta).bool()
+                        if terminated.any():
+                            keep_options = alive_options[keeps_option]
+                            keep_options[terminated] = self.network.select_option(
+                                alive_obs[keeps_option][terminated],
+                                epsilon=self.option_epsilon,
+                            )
+                            alive_options[keeps_option] = keep_options
+
+                        self.stats['option/termination_prob'].append(beta.mean().item())
+                        self.stats['option/switch_rate'].append(terminated.float().mean().item())
+
+                    option_q = self.network.get_option_q(alive_obs)
+                    alive_action, alive_logprob, _ = self.network.get_action(alive_obs, alive_options)
+                    alive_option_values = option_q.gather(1, alive_options.unsqueeze(1)).flatten()
+
+                    action[alive_mask] = alive_action
+                    logprob[alive_mask] = alive_logprob
+                    active_option_values[alive_mask] = alive_option_values
+                    current_options[alive_mask] = alive_options
+
+                    self.stats['option/value'].append(alive_option_values.mean().item())
+                    self.stats['option/active_count'].append(float(torch.unique(alive_options).numel()))
+                    for i in range(self.num_options):
+                        self.stats[f'option/occupancy_{i}'].append(
+                            (alive_options == i).float().mean().item()
+                        )
+
                 current_options[done_mask_tensor] = -1
                 self.current_options[env_id] = current_options
 
             profile('eval_copy', epoch)
             with torch.no_grad():
-                l = self.ep_lengths[env_id.start].item()
-                batch_rows = slice(
-                    self.ep_indices[env_id.start].item(),
-                    1 + self.ep_indices[env_id.stop - 1].item(),
-                )
+                next_obs = o if config['cpu_offload'] else o_device
+                prev_step_mask = self.has_prev_step[env_id].clone()
+                ep_lengths = self.ep_lengths[env_id].clone()
+                ep_indices = self.ep_indices[env_id].clone()
 
-                if config['cpu_offload']:
-                    self.rollout_observations[batch_rows, l] = o
-                else:
-                    self.rollout_observations[batch_rows, l] = o_device
+                if prev_step_mask.any():
+                    rows = ep_indices[prev_step_mask].long()
+                    cols = ep_lengths[prev_step_mask].long()
 
-                self.rollout_actions[batch_rows, l] = action
-                self.rollout_options[batch_rows, l] = current_options
-                self.rollout_logprobs[batch_rows, l] = logprob
-                self.rollout_option_values[batch_rows, l] = active_option_values
-                self.rollout_rewards[batch_rows, l] = r
-                self.rollout_terminals[batch_rows, l] = d.float()
-                self.rollout_truncations[batch_rows, l] = t.float()
+                    self.rollout_observations[rows, cols] = self.obs_buf[env_id][prev_step_mask]
+                    self.rollout_next_observations[rows, cols] = next_obs[prev_step_mask]
+                    self.rollout_actions[rows, cols] = self.act_buf[env_id][prev_step_mask]
+                    self.rollout_options[rows, cols] = self.option_buf[env_id][prev_step_mask]
+                    self.rollout_logprobs[rows, cols] = self.logprob_buf[env_id][prev_step_mask]
+                    self.rollout_option_values[rows, cols] = self.option_value_buf[env_id][prev_step_mask]
+                    self.rollout_rewards[rows, cols] = r[prev_step_mask]
+                    self.rollout_terminals[rows, cols] = d.float()[prev_step_mask]
+                    self.rollout_truncations[rows, cols] = t.float()[prev_step_mask]
 
-                self.ep_lengths[env_id] += 1
-                if l + 1 >= self.rollout_horizon:
-                    num_full = env_id.stop - env_id.start
-                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=device).int()
-                    self.ep_lengths[env_id] = 0
-                    self.free_idx += num_full
-                    self.full_rows += num_full
+                    ep_lengths[prev_step_mask] += 1
+                    full_mask = ep_lengths >= self.rollout_horizon
+                    if full_mask.any():
+                        num_full = int(full_mask.sum().item())
+                        ep_indices[full_mask] = self.free_idx + torch.arange(
+                            num_full, device=device, dtype=torch.int32
+                        )
+                        ep_lengths[full_mask] = 0
+                        self.free_idx += num_full
+                        self.full_rows += num_full
 
+                obs_buf = self.obs_buf[env_id]
+                act_buf = self.act_buf[env_id]
+                option_buf = self.option_buf[env_id]
+                logprob_buf = self.logprob_buf[env_id]
+                option_value_buf = self.option_value_buf[env_id]
+                has_prev_step = torch.zeros_like(self.has_prev_step[env_id])
+
+                if alive_mask.any():
+                    obs_buf[alive_mask] = next_obs[alive_mask]
+                    act_buf[alive_mask] = action[alive_mask]
+                    option_buf[alive_mask] = current_options[alive_mask]
+                    logprob_buf[alive_mask] = logprob[alive_mask]
+                    option_value_buf[alive_mask] = active_option_values[alive_mask]
+                    has_prev_step[alive_mask] = True
+
+                self.obs_buf[env_id] = obs_buf
+                self.act_buf[env_id] = act_buf
+                self.option_buf[env_id] = option_buf
+                self.logprob_buf[env_id] = logprob_buf
+                self.option_value_buf[env_id] = option_value_buf
+                self.has_prev_step[env_id] = has_prev_step
+                self.ep_lengths[env_id] = ep_lengths
+                self.ep_indices[env_id] = ep_indices
                 action = action.cpu().numpy()
                 
 
@@ -417,12 +461,12 @@ class PuffeRL:
             idx = torch.randint(0, self.rollout_segments, (self.minibatch_segments,), device=device)
 
             profile('train_copy', epoch)
-            mb_obs = self.rollout_observations[idx, :-1]
-            mb_next_obs = self.rollout_observations[idx, 1:]
-            mb_actions = self.rollout_actions[idx, :-1]
-            mb_options = self.rollout_options[idx, :-1]
-            mb_rewards = self.rollout_rewards[idx, 1:]
-            mb_terminals = self.rollout_terminals[idx, 1:]
+            mb_obs = self.rollout_observations[idx]
+            mb_next_obs = self.rollout_next_observations[idx]
+            mb_actions = self.rollout_actions[idx]
+            mb_options = self.rollout_options[idx]
+            mb_rewards = self.rollout_rewards[idx]
+            mb_terminals = self.rollout_terminals[idx]
 
             profile('train_forward', epoch)
             mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
