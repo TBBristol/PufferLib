@@ -298,6 +298,11 @@ class PuffeRL:
             with torch.no_grad(), self.amp_context:
                 current_options = self.current_options[env_id]
                 option_q = self.network.get_option_q(o_device)
+                done_mask_tensor = torch.as_tensor(
+                    done_mask,
+                    device=current_options.device,
+                    dtype=torch.bool,
+                )
 
                 needs_option = current_options < 0
                 if needs_option.any():
@@ -312,13 +317,7 @@ class PuffeRL:
                         current_options[keeps_option],
                     )
                     terminated = torch.bernoulli(beta).bool()
-                    done_mask_tensor = torch.as_tensor(
-                        done_mask,
-                        device=terminated.device,
-                        dtype=torch.bool,
-                    )[keeps_option]
-                  
-                    reset_option = terminated | done_mask_tensor
+                    reset_option = terminated
                     if reset_option.any():
                         keep_options = current_options[keeps_option]
                         keep_options[reset_option] = self.network.select_option(
@@ -338,6 +337,9 @@ class PuffeRL:
                     self.stats[f'option/occupancy_{i}'].append(
                         (current_options == i).float().mean().item()
                     )
+                # Done envs reset on the following send, so force them to
+                # pick a fresh option from the reset observation next recv.
+                current_options[done_mask_tensor] = -1
                 self.current_options[env_id] = current_options
 
             profile('eval_copy', epoch)
