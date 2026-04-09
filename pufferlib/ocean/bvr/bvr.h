@@ -14,6 +14,8 @@
 #include "missilelib.h"
 
 #define OBS_DIM 18
+#define EDGE_SAFETY_MARGIN 80.0f
+#define EDGE_PENALTY_SCALE 1.0f
 
 typedef struct Client Client;
 typedef struct Log Log;
@@ -25,6 +27,7 @@ struct Log {
   float episode_length;
   float perf;
   float oob;
+  float missile_hit;
   float timeout;
   float n;
 };
@@ -58,12 +61,13 @@ void init(BvrEnv *env) {
 }
 
 void add_log(BvrEnv *env, int idx,
-             bool timeout, bool oob) {
+             bool timeout, bool oob, bool missile_hit) {
   Plane *agent = &env->agents[idx];
   env->log.episode_return += agent->episode_return;
   env->log.episode_length += agent->episode_length;
   env->log.perf += env->rewards[idx];
   if (oob) { env->log.oob += 1.0f; }
+  if (missile_hit) { env->log.missile_hit += 1.0f; }
   if (timeout) {
     env->log.timeout += 1.0f;
   }
@@ -188,12 +192,10 @@ void clear_observation_history(BvrEnv *env, int idx) {
 void reset_agent(BvrEnv *env, Plane *agent, int idx) {
   agent->episode_return = 0.0f;
   agent->episode_length = 0;
-  float dr = rndf(0.1f, 0.4f);
+  float dr = 0.0f;
   init_plane(agent, dr);
 
-  agent->state.pos =
-      (Vec3){rndf(-30.0f, 30.0f), rndf(-30.0f, 30.0f),
-             rndf(20.0f, 80.0f)};
+  agent->state.pos = (Vec3){0.0f, 0.0f, 75.0f};
 
   agent->prev_pos = agent->state.pos;
   clear_observation_history(env, idx);
@@ -216,11 +218,13 @@ void c_reset(BvrEnv *env) {
 void c_step(BvrEnv *env) {
   env->tick += 1;
 
-  if (!env->missile_active && env->tick >= env->next_missile_spawn_tick) {
+  if (!env->missile_active &&
+      env->missile_spawn_delay_sec >= 0.0f &&
+      env->tick >= env->next_missile_spawn_tick) {
     init_missile(&env->missile);
-    env->missile.state.pos = (Vec3){0.0f, 0.0f, 1.0f};
+    env->missile.state.pos = (Vec3){0.0f, 0.0f, 40.0f};
     if (env->num_agents > 0) {
-      aim_missile_at_point(&env->missile, env->agents[0].state.pos, 50.0f);
+      aim_missile_at_point(&env->missile, env->agents[0].state.pos, 70.0f);
     }
     env->missile_active = true;
   }
@@ -240,6 +244,17 @@ void c_step(BvrEnv *env) {
 
     float reward = 0.0f;
 
+    float edge_dist_x = GRID_X - fabsf(agent->state.pos.x);
+    float edge_dist_y = GRID_Y - fabsf(agent->state.pos.y);
+    float edge_dist_z = fminf(agent->state.pos.z, GRID_Z - agent->state.pos.z);
+    float edge_dist = fminf(edge_dist_x, fminf(edge_dist_y, edge_dist_z));
+
+    if (!out_of_bounds && edge_dist < EDGE_SAFETY_MARGIN) {
+      float edge_dist_clamped = clampf(edge_dist, 0.0f, EDGE_SAFETY_MARGIN);
+      float u = (EDGE_SAFETY_MARGIN - edge_dist_clamped) / EDGE_SAFETY_MARGIN;
+      reward -= EDGE_PENALTY_SCALE * u;
+    }
+
     // Update agent state
     agent->episode_length++;
 
@@ -251,14 +266,14 @@ void c_step(BvrEnv *env) {
       env->rewards[i] -= 1.0f;
       agent->episode_return -= 1.0f;
       env->terminals[i] = 1;
-      add_log(env, i,false, true);
+      add_log(env, i, false, true, false);
       c_reset(env);
       return;
     } else if (env->tick >= HORIZON - 1) {
       env->rewards[i] += 1.0f;
       agent->episode_return += 1.0f;
       env->terminals[i] = 1;
-      add_log(env, i, true,false);
+      add_log(env, i, true, false, false);
       c_reset(env);
       return;
     }
@@ -279,10 +294,11 @@ void c_step(BvrEnv *env) {
     if (missile_hit_agent) {
       env->missile_active = false;
       env->next_missile_spawn_tick = env->tick + (int)(env->missile_spawn_delay_sec / DT);
-      env->rewards[0] -= 1.0f;
+      env->agents[0].episode_return -= env->rewards[0];
+      env->rewards[0] = -1.0f;
       env->agents[0].episode_return -= 1.0f;
       env->terminals[0] = 1;
-      add_log(env, 0, false, false);
+      add_log(env, 0, false, false, true);
       c_reset(env);
       return;
     } else if (missile_out_of_bounds) {

@@ -10,7 +10,7 @@
 // Visualisation properties
 #define WIDTH 1080
 #define HEIGHT 720
-#define TRAIL_LENGTH 50
+#define TRAIL_LENGTH 200
 #define HORIZON 1024
 
 //THESE NEED ADAPTING FOR APPROPROATE SIZES FOR PLANES
@@ -20,7 +20,7 @@
 #define GRID_X 150.0f
 #define GRID_Y 150.0f
 #define GRID_Z 150.0f
-#define DT 0.05f
+#define DT 0.01f
 #define DT_RNG 0.0f
 
 // Base aircraft physical parameters
@@ -30,10 +30,11 @@
 #define BASE_IZZ 5.0f
 #define BASE_GRAVITY 9.81f
 
-#define BASE_MAX_THRUST 120.0f
+#define BASE_MAX_THRUST 240.0f
 #define BASE_MAX_VEL 250.0f
 #define BASE_MAX_OMEGA 8.0f
 #define BASE_K_THROTTLE 1.0f
+#define BASE_MIN_THROTTLE 0.4f
 
 // Base geometry / atmosphere
 #define BASE_WING_AREA 1.8f
@@ -47,7 +48,7 @@
 #define BASE_CL_ELEVATOR 0.4f
 
 #define BASE_CD0 0.03f
-#define BASE_CD_ALPHA2 0.25f
+#define BASE_CD_ALPHA2 0.08f
 
 #define BASE_CY_BETA -0.7f
 #define BASE_CY_RUDDER 0.12f
@@ -55,7 +56,7 @@
 // Moment coefficients
 #define BASE_Cl_BETA -0.08f
 #define BASE_Cl_AILERON 0.10f
-#define BASE_Cl_P -0.45f
+#define BASE_Cl_P -0.8f
 #define BASE_Cl_R 0.08f
 
 #define BASE_Cm0 0.01f
@@ -66,22 +67,24 @@
 #define BASE_Cn_BETA 0.18f
 #define BASE_Cn_RUDDER -0.08f
 #define BASE_Cn_P -0.03f
-#define BASE_Cn_R -0.16f
+#define BASE_Cn_R -0.3f
 
 // Controller gains
-#define BASE_K_HEADING 1.5f
-#define BASE_MAX_BANK_CMD 0.8f
+#define BASE_K_HEADING 1.2f
+#define BASE_MAX_BANK_CMD 1.2f
 
-#define BASE_K_BANK 2.0f
-#define BASE_K_ROLL_RATE 0.4f
+#define BASE_K_BANK 1.0f
+#define BASE_K_ROLL_RATE 0.8f
 
-#define BASE_K_ALTITUDE 0.1f
-#define BASE_MAX_PITCH_CMD 0.35f
+#define BASE_K_ALTITUDE 0.02f
+#define BASE_MAX_PITCH_CMD 0.30f
+#define BASE_K_TURN_LIFT_COMP 1.6f
 
-#define BASE_K_PITCH 2.0f
-#define BASE_K_PITCH_RATE 0.5f
+#define BASE_K_PITCH 0.08f
+#define BASE_K_PITCH_RATE 1.0f
+#define BASE_ELEVATOR_TRIM 0.0f
 
-#define BASE_K_BETA 0.5f
+#define BASE_K_BETA 0.1f
 #define BASE_K_YAW_RATE 0.2f
 
 // Initial state
@@ -89,7 +92,7 @@
 #define BASE_INIT_Y 0.0f
 #define BASE_INIT_Z 100.0f
 
-#define BASE_INIT_U 20.0f
+#define BASE_INIT_U 30.0f
 #define BASE_INIT_V 0.0f
 #define BASE_INIT_W 0.0f
 
@@ -97,7 +100,15 @@
 #define BASE_INIT_Q 0.0f
 #define BASE_INIT_R 0.0f
 
-#define BASE_INIT_THROTTLE 0.6f
+#define BASE_TRIM_PITCH 0.02f
+#define BASE_INIT_THROTTLE 0.5f
+
+// Simplified flight-model tuning
+#define BASE_BANK_RESPONSE 1.2f
+#define BASE_PITCH_RESPONSE 1.6f
+#define BASE_TURN_RATE_GAIN 0.7f
+#define BASE_LIFT_ACCEL_SCALE 22.0f
+#define BASE_LIFT_DRAG_GAIN 0.03f
 
 // Corner to corner distance
 #define MAX_DIST sqrtf((2*GRID_X)*(2*GRID_X) + (2*GRID_Y)*(2*GRID_Y) + (2*GRID_Z)*(2*GRID_Z))
@@ -283,6 +294,30 @@ static inline Quat quat_inverse(Quat q) {
     return (Quat){q.w, -q.x, -q.y, -q.z}; 
 }
 
+static inline Quat quat_from_euler(float roll, float pitch, float yaw) {
+    float cr = cosf(0.5f * roll);
+    float sr = sinf(0.5f * roll);
+    float cp = cosf(0.5f * pitch);
+    float sp = sinf(0.5f * pitch);
+    float cy = cosf(0.5f * yaw);
+    float sy = sinf(0.5f * yaw);
+
+    Quat q = {
+        .w = cr * cp * cy + sr * sp * sy,
+        .x = sr * cp * cy - cr * sp * sy,
+        .y = cr * sp * cy + sr * cp * sy,
+        .z = cr * cp * sy - sr * sp * cy,
+    };
+    float n = sqrtf(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    if (n > 0.0f) {
+        q.w /= n;
+        q.x /= n;
+        q.y /= n;
+        q.z /= n;
+    }
+    return q;
+}
+
 Quat rndquat() {
     float u1 = rndf(0.0f, 1.0f);
     float u2 = rndf(0.0f, 1.0f);
@@ -337,7 +372,9 @@ void action_to_controls(
     // read actions and convert from [-1,1]
     float heading_cmd = wrap_angle(actions[0] * (float)M_PI);
     float altitude_cmd = 0.5f * (actions[1] + 1.0f) * GRID_Z;
-    float throttle_cmd = clampf(0.5f * (actions[2] + 1.0f), 0.0f, 1.0f);
+    float throttle_raw = clampf(0.5f * (actions[2] + 1.0f), 0.0f, 1.0f);
+    float throttle_cmd = BASE_MIN_THROTTLE
+                       + (1.0f - BASE_MIN_THROTTLE) * throttle_raw;
 
     //Comvert currnt state to roll pitch yaw
     float roll, pitch, yaw;
@@ -346,6 +383,7 @@ void action_to_controls(
     // Velocity in body f.o.r
     Vec3 v_body = quat_rotate(quat_inverse(state->quat), state->vel);
     float V = norm3(v_body);
+
 
     //beta is sideslip angle (0 = on nose, > 0 right, < 0 left)
     //ie how sideways the craft is moving relative to dir its pointing
@@ -357,8 +395,8 @@ void action_to_controls(
     // Heading target -> bank command
     // bank proportional to heading error so use bank error * bank coeff
     float heading_err = wrap_angle(heading_cmd - yaw);
-    float bank_cmd = ctrl->k_heading * heading_err;
-    bank_cmd = clampf(bank_cmd, -ctrl->max_bank_cmd, ctrl->max_bank_cmd);
+    float bank_cmd = ctrl->max_bank_cmd
+                   * tanhf(ctrl->k_heading * heading_err / ctrl->max_bank_cmd);
 
     // Bank command -> aileron same logic as bank
     float bank_err = bank_cmd - roll;
@@ -368,13 +406,18 @@ void action_to_controls(
 
     // Altitude target -> pitch command same logic as bank
     float altitude_err = altitude_cmd - state->pos.z;
-    float pitch_cmd = ctrl->k_altitude * altitude_err;
+    float supported_bank = fmaxf(fabsf(roll), fabsf(bank_cmd));
+    float cos_roll = fmaxf(cosf(supported_bank), 0.3f);
+    float load_factor = 1.0f / cos_roll;
+    float turn_pitch_comp = BASE_K_TURN_LIFT_COMP * (load_factor - 1.0f);
+    float pitch_cmd = ctrl->k_altitude * altitude_err + turn_pitch_comp;
     pitch_cmd = clampf(pitch_cmd, -ctrl->max_pitch_cmd, ctrl->max_pitch_cmd);
 
     // Pitch command -> elevator
     float pitch_err = pitch_cmd - pitch;
-    float elevator = ctrl->k_pitch * pitch_err
-                   - ctrl->k_pitch_rate * state->omega.y;
+    float elevator = -ctrl->k_pitch * pitch_err
+                   + ctrl->k_pitch_rate * state->omega.y
+                   + BASE_ELEVATOR_TRIM;
     elevator = clampf(elevator, -1.0f, 1.0f);
 
     // Rudder for slip and yaw damping
@@ -454,8 +497,9 @@ void init_plane(Plane* plane, float dr) {
 
     // initial state
     plane->state.pos = (Vec3){BASE_INIT_X, BASE_INIT_Y, BASE_INIT_Z};
-    plane->state.vel = (Vec3){BASE_INIT_U, BASE_INIT_V, BASE_INIT_W};
-    plane->state.quat = (Quat){1.0f, 0.0f, 0.0f, 0.0f};
+    plane->state.quat = quat_from_euler(0.0f, BASE_TRIM_PITCH, 0.0f);
+    plane->state.vel = quat_rotate(
+        plane->state.quat, (Vec3){BASE_INIT_U, BASE_INIT_V, BASE_INIT_W});
     plane->state.omega = (Vec3){BASE_INIT_P, BASE_INIT_Q, BASE_INIT_R};
     plane->state.throttle_state = BASE_INIT_THROTTLE;
 
@@ -496,13 +540,18 @@ void compute_derivatives(State* state, Params* params, Controls* cmd, StateDeriv
         beta = atan2f(v_body.y, v_body.x);
     }
 
+    float V_ref = fmaxf(V, 1e-4f);
+    float p_hat = state->omega.x * params->wing_span / (2.0f * V_ref);
+    float q_hat = state->omega.y * params->mean_chord / (2.0f * V_ref);
+    float r_hat = state->omega.z * params->wing_span / (2.0f * V_ref);
+
                                                
     float CL = params->CL0 
          + params->CL_alpha * alpha 
          + params->CL_elevator * cmd->elevator;
 
-    float CD = params->CD0 
-         + params->CD_alpha2 * alpha * alpha;
+    float CD = params->CD0
+         + params->CD_alpha2 * CL * CL;
 
     float CY = params->CY_beta * beta 
          + params->CY_rudder * cmd->rudder;
@@ -525,18 +574,18 @@ void compute_derivatives(State* state, Params* params, Controls* cmd, StateDeriv
 
     float Cl = params->Cl_beta * beta
          + params->Cl_aileron * cmd->aileron
-         + params->Cl_p * state->omega.x
-         + params->Cl_r * state->omega.z;
+         + params->Cl_p * p_hat
+         + params->Cl_r * r_hat;
 
     float Cm = params->Cm0
              + params->Cm_alpha * alpha
              + params->Cm_elevator * cmd->elevator
-             + params->Cm_q * state->omega.y;
+             + params->Cm_q * q_hat;
 
     float Cn = params->Cn_beta * beta
              + params->Cn_rudder * cmd->rudder
-             + params->Cn_p * state->omega.x
-             + params->Cn_r * state->omega.z;
+             + params->Cn_p * p_hat
+             + params->Cn_r * r_hat;
 
     Vec3 Tau;
     Tau.x = q * params->wing_area * params->wing_span * Cl;
@@ -636,17 +685,90 @@ void move_aircraft(Plane* plane, float* actions) {
     actions[1] = clampf(actions[1], -1.0f, 1.0f); // altitude target representation
     actions[2] = clampf(actions[2],  -1.0f, 1.0f); // throttle target, if already [0,1]
 
-    // domain randomized dt
     float dt = DT * rndf(1.0f - DT_RNG, 1.0f + DT_RNG);
-
-    // save previous position
     plane->prev_pos = plane->state.pos;
 
-    // update aircraft state
-    rk4_step(&plane->state, &plane->params, &plane->control_params, actions, dt);
+    float roll, pitch, yaw;
+    quat_to_euler(plane->state.quat, &roll, &pitch, &yaw);
 
-    // clamp for stability / observations
-    clamp3(&plane->state.vel, -plane->params.max_vel, plane->params.max_vel);
-    clamp3(&plane->state.omega, -plane->params.max_omega, plane->params.max_omega);
+    float heading_cmd = wrap_angle(actions[0] * (float)M_PI);
+    float altitude_cmd = 0.5f * (actions[1] + 1.0f) * GRID_Z;
+    float throttle_raw = clampf(0.5f * (actions[2] + 1.0f), 0.0f, 1.0f);
+    float throttle_cmd = BASE_MIN_THROTTLE
+                       + (1.0f - BASE_MIN_THROTTLE) * throttle_raw;
+
+    float speed = norm3(plane->state.vel);
+    if (speed < 1e-4f) {
+        speed = BASE_INIT_U;
+    }
+
+    float heading_err = wrap_angle(heading_cmd - yaw);
+    float bank_cmd = plane->control_params.max_bank_cmd
+                   * tanhf(plane->control_params.k_heading
+                         * heading_err
+                         / plane->control_params.max_bank_cmd);
+    float bank_step = BASE_BANK_RESPONSE * (bank_cmd - roll) * dt;
+    float new_roll = roll + bank_step;
+    new_roll = clampf(new_roll, -plane->control_params.max_bank_cmd,
+                                 plane->control_params.max_bank_cmd);
+
+    float altitude_err = altitude_cmd - plane->state.pos.z;
+    float cos_roll = fmaxf(cosf(fabsf(new_roll)), 0.35f);
+    float load_factor = 1.0f / cos_roll;
+    float pitch_cmd = BASE_TRIM_PITCH
+                    + plane->control_params.k_altitude * altitude_err
+                    + BASE_K_TURN_LIFT_COMP * (load_factor - 1.0f);
+    pitch_cmd = clampf(
+        pitch_cmd,
+        BASE_TRIM_PITCH - plane->control_params.max_pitch_cmd,
+        BASE_TRIM_PITCH + plane->control_params.max_pitch_cmd);
+    float pitch_step = BASE_PITCH_RESPONSE * (pitch_cmd - pitch) * dt;
+    float new_pitch = pitch + pitch_step;
+    new_pitch = clampf(new_pitch, -1.2f, 1.2f);
+
+    plane->state.throttle_state +=
+        (throttle_cmd - plane->state.throttle_state) / plane->params.k_throttle * dt;
     plane->state.throttle_state = clampf(plane->state.throttle_state, 0.0f, 1.0f);
+
+    float yaw_rate = BASE_TURN_RATE_GAIN * BASE_GRAVITY * tanf(new_roll) / fmaxf(speed, 8.0f);
+    float new_yaw = wrap_angle(yaw + yaw_rate * dt);
+
+    float thrust_accel = (plane->params.max_thrust * plane->state.throttle_state)
+                       / plane->params.mass;
+    float parasite_drag = plane->params.CD0 * speed * speed;
+    float induced_drag = BASE_LIFT_DRAG_GAIN * (load_factor - 1.0f) * speed * speed;
+    float climb_drag = BASE_LIFT_DRAG_GAIN * fabsf(new_pitch) * speed * speed;
+    float drag_accel = parasite_drag + induced_drag + climb_drag;
+    float gravity_along_flight = BASE_GRAVITY * sinf(new_pitch);
+    float speed_dot = thrust_accel - drag_accel - gravity_along_flight;
+    speed += speed_dot * dt;
+    speed = clampf(speed, 8.0f, plane->params.max_vel);
+
+    Quat new_quat = quat_from_euler(new_roll, new_pitch, new_yaw);
+    Vec3 forward = quat_rotate(new_quat, (Vec3){1.0f, 0.0f, 0.0f});
+    Vec3 new_vel = scalmul3(forward, speed);
+
+    float prev_roll = roll;
+    float prev_pitch = pitch;
+    float prev_yaw = yaw;
+    if (fabsf(new_yaw - prev_yaw) > (float)M_PI) {
+        if (new_yaw > prev_yaw) {
+            prev_yaw += 2.0f * (float)M_PI;
+        } else {
+            prev_yaw -= 2.0f * (float)M_PI;
+        }
+    }
+
+    plane->state.pos = add3(plane->state.pos, scalmul3(new_vel, dt));
+    plane->state.vel = new_vel;
+    plane->state.quat = new_quat;
+    plane->state.omega.x = clampf((new_roll - prev_roll) / dt,
+                                  -plane->params.max_omega,
+                                   plane->params.max_omega);
+    plane->state.omega.y = clampf((new_pitch - prev_pitch) / dt,
+                                  -plane->params.max_omega,
+                                   plane->params.max_omega);
+    plane->state.omega.z = clampf((new_yaw - prev_yaw) / dt,
+                                  -plane->params.max_omega,
+                                   plane->params.max_omega);
 }

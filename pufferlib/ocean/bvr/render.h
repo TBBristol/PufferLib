@@ -119,14 +119,14 @@ Client *make_client(BvrEnv *env) {
     return NULL;
   }
 
-  client->camera_distance = 40.0f;
+  client->camera_distance = 140.0f;
   client->camera_azimuth = 0.0f;
-  client->camera_elevation = PI / 10.0f;
+  client->camera_elevation = PI / 7.0f;
   client->is_dragging = false;
   client->last_mouse_pos = (Vector2){0.0f, 0.0f};
 
   client->camera.up = (Vector3){0.0f, 0.0f, 1.0f};
-  client->camera.fovy = 45.0f;
+  client->camera.fovy = 55.0f;
   client->camera.projection = CAMERA_PERSPECTIVE;
 
   update_camera_position(client);
