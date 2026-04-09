@@ -254,7 +254,6 @@ void c_step(BvrEnv *env) {
       env->rewards[i] -= 1.0f;
       agent->episode_return -= 1.0f;
       env->terminals[i] = 1;
-      agent->score += reward;
       add_log(env, i,false, true);
       c_reset(env);
       return;
@@ -262,7 +261,6 @@ void c_step(BvrEnv *env) {
       env->rewards[i] += 1.0f;
       agent->episode_return += 1.0f;
       env->terminals[i] = 1;
-      agent->score += reward;
       add_log(env, i, true,false);
       c_reset(env);
       return;
@@ -287,7 +285,6 @@ void c_step(BvrEnv *env) {
       env->rewards[0] -= 1.0f;
       env->agents[0].episode_return -= 1.0f;
       env->terminals[0] = 1;
-      agent->score += reward;
       add_log(env, 0, false, false);
       c_reset(env);
       return;
