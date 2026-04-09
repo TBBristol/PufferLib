@@ -64,7 +64,7 @@ void add_log(BvrEnv *env, int idx,
   env->log.score += agent->score;
   env->log.episode_return += agent->episode_return;
   env->log.episode_length += agent->episode_length;
-  env->log.perf += agent->score / (float)agent->episode_length;
+  env->log.perf += agent->score;
   if (oob) { env->log.oob += 1.0f; }
   if (timeout) {
     env->log.timeout += 1.0f;
@@ -245,7 +245,6 @@ void c_step(BvrEnv *env) {
 
     // Update agent state
     agent->episode_length++;
-    agent->score += reward;
 
     env->rewards[i] = reward;
     agent->episode_return += reward;
@@ -255,6 +254,7 @@ void c_step(BvrEnv *env) {
       env->rewards[i] -= 1.0f;
       agent->episode_return -= 1.0f;
       env->terminals[i] = 1;
+      agent->score += reward;
       add_log(env, i,false, true);
       c_reset(env);
       return;
@@ -262,6 +262,7 @@ void c_step(BvrEnv *env) {
       env->rewards[i] += 1.0f;
       agent->episode_return += 1.0f;
       env->terminals[i] = 1;
+      agent->score += reward;
       add_log(env, i, true,false);
       c_reset(env);
       return;
@@ -286,6 +287,7 @@ void c_step(BvrEnv *env) {
       env->rewards[0] -= 1.0f;
       env->agents[0].episode_return -= 1.0f;
       env->terminals[0] = 1;
+      agent->score += reward;
       add_log(env, 0, false, false);
       c_reset(env);
       return;
