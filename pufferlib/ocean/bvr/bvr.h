@@ -259,6 +259,8 @@ void c_step(BvrEnv *env) {
       c_reset(env);
       return;
     } else if (env->tick >= HORIZON - 1) {
+      env->rewards[i] += 1.0f;
+      agent->episode_return += 1.0f;
       env->terminals[i] = 1;
       add_log(env, i, true,false);
       c_reset(env);
