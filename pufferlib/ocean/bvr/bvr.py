@@ -48,6 +48,7 @@ class Bvr(pufferlib.PufferEnv):
 
     def reset(self, seed=None):
         self.tick = 0
+        seed = 0 if seed is None else seed
         binding.vec_reset(self.c_envs, seed)
         return self.observations, []
 

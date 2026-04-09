@@ -576,7 +576,8 @@ void compute_derivatives(State* state, Params* params, Controls* cmd, StateDeriv
     derivatives->throttle_dot = throttle_dot;
 }
 
-void step(State* initial, StateDerivative* deriv, float dt, State* output) {
+static inline void integrate_state(
+    State* initial, StateDerivative* deriv, float dt, State* output) {
     output->pos = add3(initial->pos, scalmul3(deriv->vel, dt));
     output->vel = add3(initial->vel, scalmul3(deriv->v_dot, dt));
     output->quat = add_quat(initial->quat, scalmul_quat(deriv->q_dot, dt));
@@ -593,15 +594,15 @@ void rk4_step(State* state, Params* params, ControlParams* ctrl, float* actions,
     action_to_controls(state, ctrl, actions, &cmd);
     compute_derivatives(state, params, &cmd, &k1);
 
-    step(state, &k1, dt * 0.5f, &temp_state);
+    integrate_state(state, &k1, dt * 0.5f, &temp_state);
     action_to_controls(&temp_state, ctrl, actions, &cmd);
     compute_derivatives(&temp_state, params, &cmd, &k2);
 
-    step(state, &k2, dt * 0.5f, &temp_state);
+    integrate_state(state, &k2, dt * 0.5f, &temp_state);
     action_to_controls(&temp_state, ctrl, actions, &cmd);
     compute_derivatives(&temp_state, params, &cmd, &k3);
 
-    step(state, &k3, dt, &temp_state);
+    integrate_state(state, &k3, dt, &temp_state);
     action_to_controls(&temp_state, ctrl, actions, &cmd);
     compute_derivatives(&temp_state, params, &cmd, &k4);
 

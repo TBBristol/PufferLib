@@ -21,7 +21,6 @@ typedef struct BvrEnv BvrEnv;
 typedef struct BvrEnv Bvr;
 
 struct Log {
-  float score;
   float episode_return;
   float episode_length;
   float perf;
@@ -61,10 +60,9 @@ void init(BvrEnv *env) {
 void add_log(BvrEnv *env, int idx,
              bool timeout, bool oob) {
   Plane *agent = &env->agents[idx];
-  env->log.score += agent->score;
   env->log.episode_return += agent->episode_return;
   env->log.episode_length += agent->episode_length;
-  env->log.perf += agent->score;
+  env->log.perf += env->rewards[idx];
   if (oob) { env->log.oob += 1.0f; }
   if (timeout) {
     env->log.timeout += 1.0f;
@@ -190,7 +188,6 @@ void clear_observation_history(BvrEnv *env, int idx) {
 void reset_agent(BvrEnv *env, Plane *agent, int idx) {
   agent->episode_return = 0.0f;
   agent->episode_length = 0;
-  agent->score = 0.0f;
   float dr = rndf(0.1f, 0.4f);
   init_plane(agent, dr);
 
@@ -254,7 +251,6 @@ void c_step(BvrEnv *env) {
       env->rewards[i] -= 1.0f;
       agent->episode_return -= 1.0f;
       env->terminals[i] = 1;
-      agent->score += reward;
       add_log(env, i,false, true);
       c_reset(env);
       return;
@@ -262,7 +258,6 @@ void c_step(BvrEnv *env) {
       env->rewards[i] += 1.0f;
       agent->episode_return += 1.0f;
       env->terminals[i] = 1;
-      agent->score += reward;
       add_log(env, i, true,false);
       c_reset(env);
       return;
@@ -287,7 +282,6 @@ void c_step(BvrEnv *env) {
       env->rewards[0] -= 1.0f;
       env->agents[0].episode_return -= 1.0f;
       env->terminals[0] = 1;
-      agent->score += reward;
       add_log(env, 0, false, false);
       c_reset(env);
       return;
