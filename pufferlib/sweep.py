@@ -247,8 +247,18 @@ def pareto_points(observations):
     if not observations:
         return [], []
 
-    scores = np.array([e['output'] for e in observations])
-    costs = np.array([e['cost'] for e in observations])
+    valid = [
+        (idx, obs) for idx, obs in enumerate(observations)
+        if np.isfinite(obs['output']) and np.isfinite(obs['cost'])
+    ]
+    if not valid:
+        return [], []
+
+    valid_indices = [idx for idx, _ in valid]
+    valid_observations = [obs for _, obs in valid]
+
+    scores = np.array([e['output'] for e in valid_observations])
+    costs = np.array([e['cost'] for e in valid_observations])
 
     # Sort by cost to find non-dominated points efficiently
     sorted_indices = np.argsort(costs)
@@ -259,8 +269,8 @@ def pareto_points(observations):
 
     for idx in sorted_indices:
         if scores[idx] > max_score_so_far + EPSILON:
-            pareto.append(observations[idx])
-            pareto_idxs.append(idx)
+            pareto.append(valid_observations[idx])
+            pareto_idxs.append(valid_indices[idx])
             max_score_so_far = scores[idx]
 
     return pareto, pareto_idxs
@@ -747,11 +757,20 @@ class Protein:
         pruned_front = prune_pareto_front(pareto_front)
         pareto_observations = pruned_front if self.prune_pareto else pareto_front
 
+        if not pareto_observations:
+            zero_one = self.sobol.random(1)[0]
+            suggestion = 2 * zero_one - 1
+            if self.cost_param_idx is not None:
+                cost_suggestion = self.cost_random_suggestion + 0.1 * np.random.randn()
+                suggestion[self.cost_param_idx] = np.clip(cost_suggestion, -1, 1)
+            info['fallback'] = 'empty_pareto_front'
+            return self.hyperparameters.to_dict(suggestion, fill), info
+
         # Use the max cost from the pruned pareto to avoid inefficiently long runs
         if self.upper_cost_threshold < 0:
-            self.upper_cost_threshold = pruned_front[-1]['cost']
+            self.upper_cost_threshold = pareto_observations[-1]['cost']
         # Try to change the threshold slowly
-        elif self.upper_cost_threshold < pruned_front[-1]['cost']:
+        elif self.upper_cost_threshold < pareto_observations[-1]['cost']:
             self.upper_cost_threshold *= 1.01
         self.stop_threshold_model.fit(self.success_observations, self.upper_cost_threshold)
 

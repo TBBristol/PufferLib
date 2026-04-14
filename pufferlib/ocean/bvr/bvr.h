@@ -15,7 +15,7 @@
 
 #define OBS_DIM 18
 #define EDGE_SAFETY_MARGIN 80.0f
-#define EDGE_PENALTY_SCALE 1.0f
+#define EDGE_PENALTY_SCALE 0.1f
 
 typedef struct Client Client;
 typedef struct Log Log;
