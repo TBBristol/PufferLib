@@ -7,6 +7,7 @@
 static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->num_agents = unpack(kwargs, "num_agents");
     env->framestack = unpack(kwargs, "framestack");
+    env->horizon = unpack(kwargs, "horizon");
     init(env);
     return 0;
 }

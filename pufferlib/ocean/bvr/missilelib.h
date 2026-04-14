@@ -27,19 +27,20 @@
 
 #define MISSILE_BASE_CM_ALPHA -1.5f
 #define MISSILE_BASE_CM_Q -8.0f
-#define MISSILE_BASE_CM_FIN -12.0f
+#define MISSILE_BASE_CM_FIN -8.0f
 
 #define MISSILE_BASE_CN_BETA 1.5f
 #define MISSILE_BASE_CN_R -6.0f
-#define MISSILE_BASE_CN_FIN -12.0f
+#define MISSILE_BASE_CN_FIN -8.0f
 
 #define MISSILE_BASE_MAX_VEL 260.0f
-#define MISSILE_BASE_MAX_OMEGA 40.0f
+#define MISSILE_BASE_MAX_OMEGA 28.0f
 
-#define MISSILE_GUIDANCE_K_YAW 6.0f
-#define MISSILE_GUIDANCE_K_PITCH 6.0f
-#define MISSILE_GUIDANCE_K_R 0.2f
-#define MISSILE_GUIDANCE_K_Q 0.2f
+#define MISSILE_GUIDANCE_K_YAW 1.0f
+#define MISSILE_GUIDANCE_K_PITCH 0.8f
+#define MISSILE_GUIDANCE_K_R 1.2f
+#define MISSILE_GUIDANCE_K_Q 1.8f
+#define MISSILE_PN_GAIN 3.0f
 
 typedef struct {
     Vec3 pos;
@@ -139,22 +140,44 @@ static inline float missile_thrust(float t, const MissileParams *p) {
 static inline void target_to_missile_controls(
     const MissileState *state,
     Vec3 target_pos,
+    Vec3 target_vel,
     MissileControls *cmd
 ) {
-    Vec3 los_world = sub3(target_pos, state->pos);
-    Vec3 los_body = quat_rotate(quat_inverse(state->quat), los_world);
+    Vec3 rel_pos = sub3(target_pos, state->pos);
+    Vec3 rel_vel = sub3(target_vel, state->vel);
+    Vec3 los_body = quat_rotate(quat_inverse(state->quat), rel_pos);
 
     float yaw_err = atan2f(los_body.y, los_body.x);
     float pitch_err = atan2f(-los_body.z, los_body.x);
 
+    float range_xy2 = rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y;
+    float range_xy = sqrtf(range_xy2);
+    float range2 = range_xy2 + rel_pos.z * rel_pos.z;
+    float yaw_rate_los = 0.0f;
+    float pitch_rate_los = 0.0f;
+    float rho_dot = 0.0f;
+    float closing_speed = 0.0f;
+
+    if (range_xy2 > 1e-6f) {
+        yaw_rate_los = (rel_pos.x * rel_vel.y - rel_pos.y * rel_vel.x) / range_xy2;
+        rho_dot = (rel_pos.x * rel_vel.x + rel_pos.y * rel_vel.y) / range_xy;
+    }
+    if (range2 > 1e-6f) {
+        pitch_rate_los = ((-rel_vel.z) * range_xy + rel_pos.z * rho_dot) / range2;
+        closing_speed = -dot3(rel_pos, rel_vel) / sqrtf(range2);
+    }
+
+    float pn_yaw = MISSILE_PN_GAIN * closing_speed * yaw_rate_los;
+    float pn_pitch = MISSILE_PN_GAIN * closing_speed * pitch_rate_los;
+
     cmd->fin_yaw = clampf(
-        MISSILE_GUIDANCE_K_YAW * yaw_err
+        MISSILE_GUIDANCE_K_YAW * yaw_err + pn_yaw
         - MISSILE_GUIDANCE_K_R * state->omega.z,
         -1.0f, 1.0f
     );
 
     cmd->fin_pitch = clampf(
-        MISSILE_GUIDANCE_K_PITCH * pitch_err
+        MISSILE_GUIDANCE_K_PITCH * pitch_err + pn_pitch
         - MISSILE_GUIDANCE_K_Q * state->omega.y,
         -1.0f, 1.0f
     );
@@ -285,25 +308,26 @@ static inline void missile_rk4_step(
     MissileState *state,
     const MissileParams *params,
     Vec3 target_pos,
+    Vec3 target_vel,
     float dt
 ) {
     MissileStateDerivative k1, k2, k3, k4;
     MissileState temp_state;
     MissileControls cmd;
 
-    target_to_missile_controls(state, target_pos, &cmd);
+    target_to_missile_controls(state, target_pos, target_vel, &cmd);
     compute_missile_derivatives(state, params, &cmd, &k1);
 
     missile_step(state, &k1, dt * 0.5f, &temp_state);
-    target_to_missile_controls(&temp_state, target_pos, &cmd);
+    target_to_missile_controls(&temp_state, target_pos, target_vel, &cmd);
     compute_missile_derivatives(&temp_state, params, &cmd, &k2);
 
     missile_step(state, &k2, dt * 0.5f, &temp_state);
-    target_to_missile_controls(&temp_state, target_pos, &cmd);
+    target_to_missile_controls(&temp_state, target_pos, target_vel, &cmd);
     compute_missile_derivatives(&temp_state, params, &cmd, &k3);
 
     missile_step(state, &k3, dt, &temp_state);
-    target_to_missile_controls(&temp_state, target_pos, &cmd);
+    target_to_missile_controls(&temp_state, target_pos, target_vel, &cmd);
     compute_missile_derivatives(&temp_state, params, &cmd, &k4);
 
     float dt_6 = dt / 6.0f;
@@ -330,8 +354,8 @@ static inline void missile_rk4_step(
     quat_normalize(&state->quat);
 }
 
-static inline void move_missile(Missile *m, Vec3 target_pos) {
-    missile_rk4_step(&m->state, &m->params, target_pos, MISSILE_DT);
+static inline void move_missile(Missile *m, Vec3 target_pos, Vec3 target_vel) {
+    missile_rk4_step(&m->state, &m->params, target_pos, target_vel, MISSILE_DT);
     clamp3(&m->state.vel, -m->params.max_vel, m->params.max_vel);
     clamp3(&m->state.omega, -m->params.max_omega, m->params.max_omega);
 }

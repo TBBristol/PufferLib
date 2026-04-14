@@ -9,6 +9,7 @@ class Bvr(pufferlib.PufferEnv):
         self,
         num_envs=1,
         framestack=1,
+        horizon=2048,
         render_mode=None,
         log_interval=128,
         buf=None,
@@ -28,6 +29,7 @@ class Bvr(pufferlib.PufferEnv):
 
         self.num_agents = num_envs
         self.framestack = framestack
+        self.horizon = horizon
         self.render_mode = render_mode
         self.log_interval = log_interval
         self.tick = 0
@@ -44,6 +46,7 @@ class Bvr(pufferlib.PufferEnv):
             seed,
             num_agents=1,
             framestack=framestack,
+            horizon=horizon,
         )
 
     def reset(self, seed=None):

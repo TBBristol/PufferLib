@@ -11,7 +11,7 @@
 #define WIDTH 1080
 #define HEIGHT 720
 #define TRAIL_LENGTH 200
-#define HORIZON 1024
+#define DEFAULT_HORIZON 1024
 
 //THESE NEED ADAPTING FOR APPROPROATE SIZES FOR PLANES
 //assumes ground at z=0
@@ -19,7 +19,7 @@
 // World / simulation
 #define GRID_X 150.0f
 #define GRID_Y 150.0f
-#define GRID_Z 150.0f
+#define GRID_Z 300.0f
 #define DT 0.01f
 #define DT_RNG 0.0f
 
@@ -90,7 +90,7 @@
 // Initial state
 #define BASE_INIT_X 0.0f
 #define BASE_INIT_Y 0.0f
-#define BASE_INIT_Z 100.0f
+#define BASE_INIT_Z 150.0f
 
 #define BASE_INIT_U 30.0f
 #define BASE_INIT_V 0.0f

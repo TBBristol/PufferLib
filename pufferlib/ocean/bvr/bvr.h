@@ -39,6 +39,7 @@ struct BvrEnv {
   unsigned char *terminals;
   Log log;
   int tick;
+  int horizon;
   int num_agents;
   int framestack;
   float *obs_history;
@@ -54,6 +55,7 @@ void init(BvrEnv *env) {
   env->agents = (Plane*) calloc(env->num_agents, sizeof(Plane));
   env->log = (Log){0};
   env->tick = 0;
+  env->horizon = env->horizon > 0 ? env->horizon : DEFAULT_HORIZON;
   env->framestack = env->framestack > 0 ? env->framestack : 1;
   env->obs_history = (float*) calloc(
       env->num_agents * env->framestack * OBS_DIM, sizeof(float));
@@ -65,7 +67,7 @@ void add_log(BvrEnv *env, int idx,
   Plane *agent = &env->agents[idx];
   env->log.episode_return += agent->episode_return;
   env->log.episode_length += agent->episode_length;
-  env->log.perf += env->rewards[idx];
+  env->log.perf += (float)agent->episode_length / (float)env->horizon;
   if (oob) { env->log.oob += 1.0f; }
   if (missile_hit) { env->log.missile_hit += 1.0f; }
   if (timeout) {
@@ -195,7 +197,7 @@ void reset_agent(BvrEnv *env, Plane *agent, int idx) {
   float dr = 0.0f;
   init_plane(agent, dr);
 
-  agent->state.pos = (Vec3){0.0f, 0.0f, 75.0f};
+  agent->state.pos = (Vec3){0.0f, 0.0f, BASE_INIT_Z};
 
   agent->prev_pos = agent->state.pos;
   clear_observation_history(env, idx);
@@ -252,7 +254,7 @@ void c_step(BvrEnv *env) {
     if (!out_of_bounds && edge_dist < EDGE_SAFETY_MARGIN) {
       float edge_dist_clamped = clampf(edge_dist, 0.0f, EDGE_SAFETY_MARGIN);
       float u = (EDGE_SAFETY_MARGIN - edge_dist_clamped) / EDGE_SAFETY_MARGIN;
-      reward -= EDGE_PENALTY_SCALE * u;
+      reward -= EDGE_PENALTY_SCALE * u * u;
     }
 
     // Update agent state
@@ -269,7 +271,7 @@ void c_step(BvrEnv *env) {
       add_log(env, i, false, true, false);
       c_reset(env);
       return;
-    } else if (env->tick >= HORIZON - 1) {
+    } else if (env->tick >= env->horizon - 1) {
       env->rewards[i] += 1.0f;
       agent->episode_return += 1.0f;
       env->terminals[i] = 1;
@@ -280,11 +282,11 @@ void c_step(BvrEnv *env) {
   }
 
   if (env->missile_active && env->num_agents > 0) {
-    move_missile(&env->missile, env->agents[0].state.pos);
+    move_missile(&env->missile, env->agents[0].state.pos, env->agents[0].state.vel);
 
     Vec3 missile_to_agent = sub3(env->agents[0].state.pos, env->missile.state.pos);
     float missile_distance = norm3(missile_to_agent);
-    bool missile_hit_agent = missile_distance < 3.0f;
+    bool missile_hit_agent = missile_distance < 6.0f;
 
     bool missile_out_of_bounds =
         env->missile.state.pos.x < -GRID_X || env->missile.state.pos.x > GRID_X ||
