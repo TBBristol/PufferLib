@@ -570,6 +570,255 @@ static void* nmmo3_encoder_create_weights(void* self) {
 static void nmmo3_encoder_free_weights(void* weights) { free(weights); }
 static void nmmo3_encoder_free_activations(void* activations) { free(activations); }
 
+// ---- Boxoban positional encoder ----
+
+static constexpr int BOX_NUM_TYPES = 4;
+static constexpr int BOX_NUM_CELLS = 100;
+static constexpr int BOX_EMBED_DIM = 8;
+static constexpr int BOX_EMBED_FLAT = BOX_NUM_CELLS * BOX_EMBED_DIM;
+
+__global__ void box_bias_relu_kernel(
+    precision_t* __restrict__ data, const precision_t* __restrict__ bias, int total, int dim) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    data[idx] = from_float(relu(to_float(data[idx]) + to_float(bias[idx % dim])));
+}
+
+__global__ void box_relu_backward_kernel(
+    precision_t* __restrict__ grad, const precision_t* __restrict__ out, int total) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    grad[idx] = from_float(relu_backward(to_float(out[idx]), to_float(grad[idx])));
+}
+
+__global__ void boxoban_cell_embed_kernel(
+    precision_t* __restrict__ out, const precision_t* __restrict__ obs,
+    const precision_t* __restrict__ type_embed, const precision_t* __restrict__ pos_embed,
+    int B, int obs_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= B * BOX_NUM_CELLS * BOX_EMBED_DIM) return;
+    int b = idx / (BOX_NUM_CELLS * BOX_EMBED_DIM);
+    int rem = idx % (BOX_NUM_CELLS * BOX_EMBED_DIM);
+    int cell = rem / BOX_EMBED_DIM;
+    int d = rem % BOX_EMBED_DIM;
+    float sum = to_float(pos_embed[cell * BOX_EMBED_DIM + d]);
+    int base = b * obs_size + cell;
+    for (int t = 0; t < BOX_NUM_TYPES; t++) {
+        float occ = to_float(obs[base + t * BOX_NUM_CELLS]);
+        sum += occ * to_float(type_embed[t * BOX_EMBED_DIM + d]);
+    }
+    out[idx] = from_float(sum);
+}
+
+__global__ void boxoban_type_embed_backward_kernel(
+    float* __restrict__ type_grad_f, const precision_t* __restrict__ grad_cell,
+    const precision_t* __restrict__ obs, int B, int obs_size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= B * BOX_NUM_CELLS * BOX_NUM_TYPES * BOX_EMBED_DIM) return;
+    int b = idx / (BOX_NUM_CELLS * BOX_NUM_TYPES * BOX_EMBED_DIM);
+    int rem = idx % (BOX_NUM_CELLS * BOX_NUM_TYPES * BOX_EMBED_DIM);
+    int cell = rem / (BOX_NUM_TYPES * BOX_EMBED_DIM);
+    rem %= (BOX_NUM_TYPES * BOX_EMBED_DIM);
+    int t = rem / BOX_EMBED_DIM;
+    int d = rem % BOX_EMBED_DIM;
+    float occ = to_float(obs[b * obs_size + t * BOX_NUM_CELLS + cell]);
+    float g = occ * to_float(grad_cell[b * BOX_EMBED_FLAT + cell * BOX_EMBED_DIM + d]);
+    atomicAdd(&type_grad_f[t * BOX_EMBED_DIM + d], g);
+}
+
+__global__ void boxoban_pos_embed_backward_kernel(
+    float* __restrict__ pos_grad_f, const precision_t* __restrict__ grad_cell, int B) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= B * BOX_NUM_CELLS * BOX_EMBED_DIM) return;
+    int rem = idx % (BOX_NUM_CELLS * BOX_EMBED_DIM);
+    int cell = rem / BOX_EMBED_DIM;
+    int d = rem % BOX_EMBED_DIM;
+    atomicAdd(&pos_grad_f[cell * BOX_EMBED_DIM + d], to_float(grad_cell[idx]));
+}
+
+struct BoxobanEncoderWeights {
+    PrecisionTensor type_embed, pos_embed;
+    PrecisionTensor w1, b1, w2, b2, w3, b3;
+    int obs_size, hidden;
+};
+
+struct BoxobanEncoderActivations {
+    PrecisionTensor cell_flat, l1_preact, l1_act, l2_preact, l2_act, l3_preact, out, saved_obs;
+    PrecisionTensor grad_cell_flat, grad_l1, grad_l2;
+    PrecisionTensor type_embed_wgrad, pos_embed_wgrad, w1_wgrad, b1_wgrad, w2_wgrad, b2_wgrad, w3_wgrad, b3_wgrad;
+    FloatTensor type_embed_wgrad_f, pos_embed_wgrad_f;
+};
+
+static BoxobanEncoderWeights* boxoban_encoder_create(int obs_size, int hidden) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)calloc(1, sizeof(BoxobanEncoderWeights));
+    ew->obs_size = obs_size;
+    ew->hidden = hidden;
+    return ew;
+}
+
+static PrecisionTensor boxoban_encoder_forward(void* w, void* activations, PrecisionTensor input, cudaStream_t stream) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    BoxobanEncoderActivations* a = (BoxobanEncoderActivations*)activations;
+    int B = input.shape[0];
+
+    if (a->saved_obs.data) puf_copy(&a->saved_obs, &input, stream);
+
+    boxoban_cell_embed_kernel<<<grid_size(B * BOX_NUM_CELLS * BOX_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+        a->cell_flat.data, input.data, ew->type_embed.data, ew->pos_embed.data, B, ew->obs_size);
+
+    puf_mm(&a->cell_flat, &ew->w1, &a->l1_preact, stream);
+    puf_copy(&a->l1_act, &a->l1_preact, stream);
+    box_bias_relu_kernel<<<grid_size(B * (2 * ew->hidden)), BLOCK_SIZE, 0, stream>>>(
+        a->l1_act.data, ew->b1.data, B * (2 * ew->hidden), 2 * ew->hidden);
+
+    puf_mm(&a->l1_act, &ew->w2, &a->l2_preact, stream);
+    puf_copy(&a->l2_act, &a->l2_preact, stream);
+    box_bias_relu_kernel<<<grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream>>>(
+        a->l2_act.data, ew->b2.data, B * ew->hidden, ew->hidden);
+
+    puf_mm(&a->l2_act, &ew->w3, &a->l3_preact, stream);
+    puf_copy(&a->out, &a->l3_preact, stream);
+    box_bias_relu_kernel<<<grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream>>>(
+        a->out.data, ew->b3.data, B * ew->hidden, ew->hidden);
+
+    return a->out;
+}
+
+static void boxoban_encoder_backward(void* w, void* activations, PrecisionTensor grad, cudaStream_t stream) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    BoxobanEncoderActivations* a = (BoxobanEncoderActivations*)activations;
+    int B = grad.shape[0];
+
+    box_relu_backward_kernel<<<grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream>>>(
+        grad.data, a->out.data, B * ew->hidden);
+    bias_grad_kernel<<<ew->hidden, 256, 0, stream>>>(a->b3_wgrad.data, grad.data, B, ew->hidden);
+    puf_mm_tn(&grad, &a->l2_act, &a->w3_wgrad, stream);
+
+    puf_mm_nn(&grad, &ew->w3, &a->grad_l2, stream);
+    box_relu_backward_kernel<<<grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream>>>(
+        a->grad_l2.data, a->l2_act.data, B * ew->hidden);
+    bias_grad_kernel<<<ew->hidden, 256, 0, stream>>>(a->b2_wgrad.data, a->grad_l2.data, B, ew->hidden);
+    puf_mm_tn(&a->grad_l2, &a->l1_act, &a->w2_wgrad, stream);
+
+    puf_mm_nn(&a->grad_l2, &ew->w2, &a->grad_l1, stream);
+    box_relu_backward_kernel<<<grid_size(B * (2 * ew->hidden)), BLOCK_SIZE, 0, stream>>>(
+        a->grad_l1.data, a->l1_act.data, B * (2 * ew->hidden));
+    bias_grad_kernel<<<2 * ew->hidden, 256, 0, stream>>>(a->b1_wgrad.data, a->grad_l1.data, B, 2 * ew->hidden);
+    puf_mm_tn(&a->grad_l1, &a->cell_flat, &a->w1_wgrad, stream);
+    puf_mm_nn(&a->grad_l1, &ew->w1, &a->grad_cell_flat, stream);
+
+    puf_zero(&a->type_embed_wgrad_f, stream);
+    puf_zero(&a->pos_embed_wgrad_f, stream);
+    boxoban_type_embed_backward_kernel<<<grid_size(B * BOX_NUM_CELLS * BOX_NUM_TYPES * BOX_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+        a->type_embed_wgrad_f.data, a->grad_cell_flat.data, a->saved_obs.data, B, ew->obs_size);
+    boxoban_pos_embed_backward_kernel<<<grid_size(B * BOX_NUM_CELLS * BOX_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+        a->pos_embed_wgrad_f.data, a->grad_cell_flat.data, B);
+    cast<<<grid_size(BOX_NUM_TYPES * BOX_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+        a->type_embed_wgrad.data, a->type_embed_wgrad_f.data, BOX_NUM_TYPES * BOX_EMBED_DIM);
+    cast<<<grid_size(BOX_NUM_CELLS * BOX_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+        a->pos_embed_wgrad.data, a->pos_embed_wgrad_f.data, BOX_NUM_CELLS * BOX_EMBED_DIM);
+}
+
+static void boxoban_encoder_init_weights(void* w, uint64_t* seed, cudaStream_t stream) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    auto init2d = [&](PrecisionTensor& t, int rows, int cols, float gain) {
+        PrecisionTensor wt = {.data = t.data, .shape = {rows, cols}};
+        puf_kaiming_init(&wt, gain, (*seed)++, stream);
+    };
+    puf_normal_init(&ew->type_embed, 1.0f, (*seed)++, stream);
+    puf_normal_init(&ew->pos_embed, 1.0f, (*seed)++, stream);
+    init2d(ew->w1, 2 * ew->hidden, BOX_EMBED_FLAT, 1.0f);
+    init2d(ew->w2, ew->hidden, 2 * ew->hidden, 1.0f);
+    init2d(ew->w3, ew->hidden, ew->hidden, 1.0f);
+    cudaMemsetAsync(ew->b1.data, 0, numel(ew->b1.shape) * sizeof(precision_t), stream);
+    cudaMemsetAsync(ew->b2.data, 0, numel(ew->b2.shape) * sizeof(precision_t), stream);
+    cudaMemsetAsync(ew->b3.data, 0, numel(ew->b3.shape) * sizeof(precision_t), stream);
+}
+
+static void boxoban_encoder_reg_params(void* w, Allocator* alloc) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    ew->type_embed = {.shape = {BOX_NUM_TYPES, BOX_EMBED_DIM}};
+    ew->pos_embed = {.shape = {BOX_NUM_CELLS, BOX_EMBED_DIM}};
+    ew->w1 = {.shape = {2 * ew->hidden, BOX_EMBED_FLAT}};
+    ew->b1 = {.shape = {2 * ew->hidden}};
+    ew->w2 = {.shape = {ew->hidden, 2 * ew->hidden}};
+    ew->b2 = {.shape = {ew->hidden}};
+    ew->w3 = {.shape = {ew->hidden, ew->hidden}};
+    ew->b3 = {.shape = {ew->hidden}};
+    alloc_register(alloc, &ew->type_embed);
+    alloc_register(alloc, &ew->pos_embed);
+    alloc_register(alloc, &ew->w1); alloc_register(alloc, &ew->b1);
+    alloc_register(alloc, &ew->w2); alloc_register(alloc, &ew->b2);
+    alloc_register(alloc, &ew->w3); alloc_register(alloc, &ew->b3);
+}
+
+static void boxoban_encoder_reg_train(void* w, void* activations, Allocator* acts, Allocator* grads, int B_TT) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    BoxobanEncoderActivations* a = (BoxobanEncoderActivations*)activations;
+    *a = {};
+    a->cell_flat = {.shape = {B_TT, BOX_EMBED_FLAT}};
+    a->l1_preact = {.shape = {B_TT, 2 * ew->hidden}};
+    a->l1_act = {.shape = {B_TT, 2 * ew->hidden}};
+    a->l2_preact = {.shape = {B_TT, ew->hidden}};
+    a->l2_act = {.shape = {B_TT, ew->hidden}};
+    a->l3_preact = {.shape = {B_TT, ew->hidden}};
+    a->out = {.shape = {B_TT, ew->hidden}};
+    a->saved_obs = {.shape = {B_TT, ew->obs_size}};
+    a->grad_cell_flat = {.shape = {B_TT, BOX_EMBED_FLAT}};
+    a->grad_l1 = {.shape = {B_TT, 2 * ew->hidden}};
+    a->grad_l2 = {.shape = {B_TT, ew->hidden}};
+    alloc_register(acts, &a->cell_flat);
+    alloc_register(acts, &a->l1_preact); alloc_register(acts, &a->l1_act);
+    alloc_register(acts, &a->l2_preact); alloc_register(acts, &a->l2_act);
+    alloc_register(acts, &a->l3_preact); alloc_register(acts, &a->out);
+    alloc_register(acts, &a->saved_obs);
+    alloc_register(acts, &a->grad_cell_flat);
+    alloc_register(acts, &a->grad_l1);
+    alloc_register(acts, &a->grad_l2);
+
+    a->type_embed_wgrad = {.shape = {BOX_NUM_TYPES, BOX_EMBED_DIM}};
+    a->pos_embed_wgrad = {.shape = {BOX_NUM_CELLS, BOX_EMBED_DIM}};
+    a->w1_wgrad = {.shape = {2 * ew->hidden, BOX_EMBED_FLAT}};
+    a->b1_wgrad = {.shape = {2 * ew->hidden}};
+    a->w2_wgrad = {.shape = {ew->hidden, 2 * ew->hidden}};
+    a->b2_wgrad = {.shape = {ew->hidden}};
+    a->w3_wgrad = {.shape = {ew->hidden, ew->hidden}};
+    a->b3_wgrad = {.shape = {ew->hidden}};
+    a->type_embed_wgrad_f = {.shape = {BOX_NUM_TYPES, BOX_EMBED_DIM}};
+    a->pos_embed_wgrad_f = {.shape = {BOX_NUM_CELLS, BOX_EMBED_DIM}};
+    alloc_register(grads, &a->type_embed_wgrad);
+    alloc_register(grads, &a->pos_embed_wgrad);
+    alloc_register(grads, &a->w1_wgrad); alloc_register(grads, &a->b1_wgrad);
+    alloc_register(grads, &a->w2_wgrad); alloc_register(grads, &a->b2_wgrad);
+    alloc_register(grads, &a->w3_wgrad); alloc_register(grads, &a->b3_wgrad);
+    alloc_register(acts, &a->type_embed_wgrad_f);
+    alloc_register(acts, &a->pos_embed_wgrad_f);
+}
+
+static void boxoban_encoder_reg_rollout(void* w, void* activations, Allocator* alloc, int B) {
+    BoxobanEncoderWeights* ew = (BoxobanEncoderWeights*)w;
+    BoxobanEncoderActivations* a = (BoxobanEncoderActivations*)activations;
+    a->cell_flat = {.shape = {B, BOX_EMBED_FLAT}};
+    a->l1_preact = {.shape = {B, 2 * ew->hidden}};
+    a->l1_act = {.shape = {B, 2 * ew->hidden}};
+    a->l2_preact = {.shape = {B, ew->hidden}};
+    a->l2_act = {.shape = {B, ew->hidden}};
+    a->l3_preact = {.shape = {B, ew->hidden}};
+    a->out = {.shape = {B, ew->hidden}};
+    alloc_register(alloc, &a->cell_flat);
+    alloc_register(alloc, &a->l1_preact); alloc_register(alloc, &a->l1_act);
+    alloc_register(alloc, &a->l2_preact); alloc_register(alloc, &a->l2_act);
+    alloc_register(alloc, &a->l3_preact); alloc_register(alloc, &a->out);
+}
+
+static void* boxoban_encoder_create_weights(void* self) {
+    Encoder* e = (Encoder*)self;
+    return boxoban_encoder_create(e->in_dim, e->out_dim);
+}
+
+static void boxoban_encoder_free_weights(void* weights) { free(weights); }
+static void boxoban_encoder_free_activations(void* activations) { free(activations); }
+
 // Override encoder vtable for known ocean environments. No-op for unknown envs.
 static void create_custom_encoder(const std::string& env_name, Encoder* enc) {
     if (env_name == "nmmo3") {
@@ -585,6 +834,20 @@ static void create_custom_encoder(const std::string& env_name, Encoder* enc) {
             .free_activations = nmmo3_encoder_free_activations,
             .in_dim = enc->in_dim, .out_dim = enc->out_dim,
             .activation_size = sizeof(NMMO3EncoderActivations),
+        };
+    } else if (env_name == "boxoban") {
+        *enc = Encoder{
+            .forward = boxoban_encoder_forward,
+            .backward = boxoban_encoder_backward,
+            .init_weights = boxoban_encoder_init_weights,
+            .reg_params = boxoban_encoder_reg_params,
+            .reg_train = boxoban_encoder_reg_train,
+            .reg_rollout = boxoban_encoder_reg_rollout,
+            .create_weights = boxoban_encoder_create_weights,
+            .free_weights = boxoban_encoder_free_weights,
+            .free_activations = boxoban_encoder_free_activations,
+            .in_dim = enc->in_dim, .out_dim = enc->out_dim,
+            .activation_size = sizeof(BoxobanEncoderActivations),
         };
     }
 }
