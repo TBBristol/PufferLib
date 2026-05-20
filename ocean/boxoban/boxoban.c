@@ -62,16 +62,8 @@ int demo(int argc, char** argv) {
         .max_steps = 500,
         .int_r_coeff = 0.1f,
         .target_loss_pen_coeff = 0.5f,
-        .tick = 0,
-        .agent_x = 0,
-        .agent_y = 0,
-        .intermediate_rewards = NULL,
-        .on_target = 0,
-        .n_boxes = 0,
-        .win = 0,
         .difficulty_id = -1,
         .client = NULL,
-        .n_targets = 0,
 
     };
 
@@ -143,16 +135,8 @@ void test_performance(int argc, char** argv, int timeout) {
         .max_steps = 500,
         .int_r_coeff = 0.1f,
         .target_loss_pen_coeff = 0.5f,
-        .tick = 0,
-        .agent_x = 0,
-        .agent_y = 0,
-        .intermediate_rewards = NULL,
-        .on_target = 0,
-        .n_boxes = 0,
-        .win = 0,
         .difficulty_id = -1,
         .client = NULL,
-        .n_targets = 0,
     };
 
     size_t obs_count = 4u * (size_t)env.size * (size_t)env.size;
