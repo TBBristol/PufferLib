@@ -54,9 +54,7 @@ typedef struct {
     int agent_x;
     int agent_y;
     bool initialized;
-    unsigned char* intermediate_rewards;
     float int_r_coeff;
-    float target_loss_pen_coeff;
     int on_target; //num targets currently boxed
     int n_boxes; //boxes in map
     int n_targets; //targets in map
@@ -114,14 +112,6 @@ static inline unsigned char get_entity(Boxoban *env, int entity, int x, int y) {
     return env->observations[(entity)*env->size*env->size + (y)*env->size + (x)];
 }
 
-static inline void set_intermediate_reward(Boxoban *env, int x, int y, unsigned char value) {
-    env->intermediate_rewards[(y)*env->size + (x)] = value;
-}
-
-static inline unsigned char get_intermediate_reward_status(Boxoban *env, int x, int y) {
-    return env->intermediate_rewards[(y)*env->size + (x)];
-}
-
 static inline const uint32_t get_random_puzzle_idx(const Boxoban *env, size_t puzzle_count) {
     int idx = rand_r(&env->rng) % puzzle_count;
     return idx;
@@ -138,7 +128,6 @@ void init (Boxoban* env) {
         ensure_map_loaded();
         boxoban_maps_ready = 1;
     }
-    env->intermediate_rewards = calloc(env->size*env->size, sizeof(unsigned char));
     env->win = 0;
     env->initialized = false;
   }
@@ -198,8 +187,6 @@ static void load_random_puzzle(Boxoban* env) {
     env->n_targets = (int)meta[3];
     env->on_target = (int)meta[4];
 
-    memcpy(env->intermediate_rewards,
-            env->observations + TARGET * env->size * env->size,env->size * env->size);
     env->puzzle_tick = 0;
 }
 
@@ -230,12 +217,12 @@ void move_entity(Boxoban* env,unsigned char entity,int x, int y, int dx, int dy)
     set_entity(env, entity, x + dx, y + dy, 1);
 }
 
-//Updates state and intermediate reward array in place
+//Updates state in place. Returns target transition count for the pushed box.
 int take_action(Boxoban* env, int action) {
 
     int dx = 0;
     int dy = 0;
-    int int_r = 0;
+    int target_delta = 0;
 
     if (action == NOOP) {
         return 0;
@@ -269,6 +256,7 @@ int take_action(Boxoban* env, int action) {
             if (get_entity(env, TARGET, env->agent_x + dx, env->agent_y + dy) == 1) {
 
                 env->on_target -= 1;
+                target_delta -= 1;
             }
             //move both entities
             move_entity(env, BOXES, env->agent_x + dx, env->agent_y + dy, dx, dy);
@@ -277,14 +265,12 @@ int take_action(Boxoban* env, int action) {
             env->agent_x += dx;
         
             //if box is now on target, add to on_target count
-            //if its a new target recieve intermediate reward and zero out intermediate reward
             if (get_entity(env, TARGET, env->agent_x + dx, env->agent_y + dy) == 1) {
                 
                 env->on_target += 1;
-                int_r = get_intermediate_reward_status(env, env->agent_x + dx, env->agent_y + dy);
-                set_intermediate_reward(env, env->agent_x + dx, env->agent_y + dy, 0);
+                target_delta += 1;
             }
-            return int_r;
+            return target_delta;
     }
     return 0;
 }
@@ -298,15 +284,8 @@ void c_step(Boxoban* env) {
        
     int action = (int)env->actions[0];
 
-    float on_target = env->on_target;
-    int int_r = take_action(env, action); //int_r _new_ tgts covered, modifies observations in place
-    float on_target_after = env->on_target;
-                                          
-    env->rewards[0] += (float)int_r * env->int_r_coeff; //coeff in .ini
- 
-    if (on_target_after < on_target) { //target loss penalty
-        env->rewards[0] -= env->target_loss_pen_coeff; //coeff in .ini
-    }
+    int target_delta = take_action(env, action);
+    env->rewards[0] += (float)target_delta * env->int_r_coeff; //coeff in .ini
 
     //Terminals
     if (env->on_target == env->n_targets) {
@@ -332,7 +311,6 @@ void c_step(Boxoban* env) {
 
     if (env->puzzle_tick >= env->max_steps) {
         env->terminals[0] = 1;
-        env->rewards[0] -= 1.0; 
         env->episode_return += env->rewards[0];
         add_log(env);
         c_reset(env);
@@ -451,10 +429,6 @@ void c_render(Boxoban* env) {
 // Required function. Should clean up anything you allocated
 // Do not free env->observations, actions, rewards, terminals
 void c_close(Boxoban* env) {
-    if (env->intermediate_rewards) {
-          free(env->intermediate_rewards);
-          env->intermediate_rewards = NULL;
-      }
     if (IsWindowReady()) {
         if (env->client) {
             UnloadTexture(env->client->wall);
