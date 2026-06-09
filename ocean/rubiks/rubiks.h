@@ -264,20 +264,18 @@ void move(Cube *env, int face, int turns) {
     int dir = (turns > 0) ? +1 : -1;
     turns = abs(turns) % 4;
     for (int t=0; t<turns; t++) {
-        if (dir > 0) {
+        if (dir > 0 && face != D) {
             rotate_strips(env, env->strips[face]);
-            if (face == D) {
-                rotate_face_ccw(env, face);
-            } else {
-                rotate_face(env, face);
-            }
-        } else {
+            rotate_face(env, face);
+        } else if (dir < 0 && face != D) {
             rotate_strips_ccw(env, env->strips[face]);
-            if (face == D) {
-                rotate_face(env, face);
-            } else {
-                rotate_face_ccw(env, face);
-            }
+            rotate_face_ccw(env, face);
+        } else if (dir > 0) {
+            rotate_strips_ccw(env, env->strips[face]);
+            rotate_face(env, face);
+        } else {
+            rotate_strips(env, env->strips[face]);
+            rotate_face_ccw(env, face);
         }
     }
 }
@@ -469,7 +467,7 @@ void c_render(Cube* env) {
     if (env->pending_animation && !playing_animation) {
         static const int FACE_AXIS[6]  = {1, 1, 0, 0, 2, 2};
         static const int FACE_LAYER[6] = {1, 0, 1, 0, 1, 0};
-        static const int FACE_SIGN[6]  = {-1,-1,-1,+1,-1,+1};
+        static const int FACE_SIGN[6]  = {-1,+1,-1,+1,-1,+1};
         current_stickers = env->stickers;
 
         anim.rotating = 1;
