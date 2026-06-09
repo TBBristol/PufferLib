@@ -264,6 +264,7 @@ void move(Cube *env, int face, int turns) {
     int dir = (turns > 0) ? +1 : -1;
     turns = abs(turns) % 4;
     for (int t=0; t<turns; t++) {
+        // D is viewed from below, so its clockwise strip cycle is reversed.
         if (dir > 0 && face != D) {
             rotate_strips(env, env->strips[face]);
             rotate_face(env, face);
