@@ -10,10 +10,11 @@
 #define RUBIKS_SIZE 3
 #define RUBIKS_OBS_SIZE (6 * RUBIKS_SIZE * RUBIKS_SIZE * 6)
 #define RUBIKS_SOLVED_PAUSE 1.0f
+#define RUBIKS_MAX_SHUFFLES 20
 
 typedef struct {
-    float perf; // 1 if solved, otherwise 0
-    float score; // Same value as perf
+    float perf; // Highest curriculum level solved, normalized to 0-1
+    float score; // Highest curriculum level solved
     float episode_return; // Recommended metric: sum of agent rewards over episode
     float episode_length; // Recommended metric: number of steps of agent episode
     float n; // Required as the last field
@@ -49,7 +50,10 @@ typedef struct {
     int num_agents;
     int max_episode_steps;
     int tick;
-    int shuffles; // number of random moves to shuffle at reset
+    int episode_steps;
+    int solved_level;
+    int shuffles; // 0 enables the progressive shuffle curriculum
+    int current_shuffles;
     int *stickers; // 6x3x3 stickers
     strip_t strips[6][4]; // Precomputed strips for each face
     Cubelet_r *cubelets; // for rendering
@@ -67,6 +71,7 @@ typedef struct {
     int pending_animation;
     int animation_face;
     int animation_turns;
+    int animation_shuffles;
     int animation_solved;
 } Cube;
 
@@ -100,10 +105,10 @@ typedef struct {
 static MoveState anim = {0};
 
 //Puffer logging
-void add_log(Cube* env, int solved) {
-    env->log.perf += solved;
-    env->log.score += solved;
-    env->log.episode_length += env->tick;
+void add_log(Cube* env, float perf, float score) {
+    env->log.perf += perf;
+    env->log.score += score;
+    env->log.episode_length += env->episode_steps;
     env->log.episode_return += env->episode_return;
     env->log.n++;
 }
@@ -261,20 +266,34 @@ void move(Cube *env, int face, int turns) {
     for (int t=0; t<turns; t++) {
         if (dir > 0) {
             rotate_strips(env, env->strips[face]);
-            rotate_face(env, face);
+            if (face == D) {
+                rotate_face_ccw(env, face);
+            } else {
+                rotate_face(env, face);
+            }
         } else {
             rotate_strips_ccw(env, env->strips[face]);
-            rotate_face_ccw(env, face);
+            if (face == D) {
+                rotate_face(env, face);
+            } else {
+                rotate_face_ccw(env, face);
+            }
         }
     }
 }
 
 
 void shuffle(Cube* env, int shuffles){
+    static const int FACE_AXIS[6] = {1, 1, 0, 0, 2, 2};
+    int previous_axis = -1;
     for (int i=0;i<shuffles;i++) {
         int face = rand_r(&env->rng) % 6;
+        while (FACE_AXIS[face] == previous_axis) {
+            face = rand_r(&env->rng) % 6;
+        }
         int turns = (rand_r(&env->rng) % 3) + 1; // 1,2,3 turns
         move(env, face, turns);
+        previous_axis = FACE_AXIS[face];
     }
 }
 
@@ -298,14 +317,27 @@ int is_solved(Cube *env) {
     return 1;
 }
 
+static inline int shuffle_count(const Cube* env) {
+    return env->shuffles == 0 ? env->current_shuffles : env->shuffles;
+}
+
+void reset_puzzle(Cube* env) {
+    memset(env->observations, 0, sizeof(float) * RUBIKS_OBS_SIZE);
+    do {
+        reset_stickers(env);
+        shuffle(env, shuffle_count(env));
+    } while (is_solved(env));
+    env->tick = 0;
+    compute_observations(env);
+}
+
 // Required function
 void c_reset(Cube* env) {
-    memset(env->observations, 0, sizeof(float) * RUBIKS_OBS_SIZE);
-    reset_stickers(env);
-    shuffle(env, env->shuffles);
-    env->tick = 0;
+    env->current_shuffles = env->shuffles == 0 ? 1 : env->shuffles;
+    env->episode_steps = 0;
+    env->solved_level = 0;
     env->episode_return = 0;
-    compute_observations(env);
+    reset_puzzle(env);
 }
 
 //Some debugging functions
@@ -672,7 +704,10 @@ void c_render(Cube* env) {
     snprintf(buf, sizeof(buf), "Tick %d", env->tick);
     DrawText(buf, 10, 10, 20, WHITE);
 
-    snprintf(buf, sizeof(buf), "Shuffles: %d", env->shuffles);
+    int displayed_shuffles = playing_animation
+        ? env->animation_shuffles
+        : shuffle_count(env);
+    snprintf(buf, sizeof(buf), "Shuffles: %d", displayed_shuffles);
     DrawText(buf, 10, 40, 20, WHITE);
 
     EndDrawing();
@@ -687,6 +722,7 @@ void c_step(Cube* env) {
     env->rewards[0] = 0.0f;
     env->terminals[0] = 0.0f;
     env->tick += 1;
+    env->episode_steps += 1;
 
     int face, turns;
     decode_action((int)env->actions[0], &face, &turns);
@@ -695,6 +731,7 @@ void c_step(Cube* env) {
         memcpy(env->render_stickers, env->stickers, sizeof(env->render_stickers));
         env->animation_face = face;
         env->animation_turns = turns;
+        env->animation_shuffles = shuffle_count(env);
         env->pending_animation = 1;
     }
 
@@ -707,18 +744,29 @@ void c_step(Cube* env) {
     }
 
    if (solved) {
-       env->terminals[0] = 1.0f;
        env->rewards[0] = 1.0f;
        env->episode_return += env->rewards[0];
-       add_log(env, 1);
-       c_reset(env);
+
+       if (env->shuffles == 0) {
+           env->solved_level = env->current_shuffles;
+           if (env->current_shuffles < RUBIKS_MAX_SHUFFLES) {
+               env->current_shuffles += 1;
+           }
+           reset_puzzle(env);
+       } else {
+           env->terminals[0] = 1.0f;
+           add_log(env, 1.0f, 1.0f);
+           c_reset(env);
+       }
        return;
    }
 
    if (env->tick >= env->max_episode_steps) {
        env->terminals[0] = 1.0f;
        env->episode_return += env->rewards[0];
-       add_log(env, 0);
+       add_log(env,
+           env->solved_level / (float)RUBIKS_MAX_SHUFFLES,
+           env->solved_level);
        c_reset(env);
        return;
    }
